@@ -1,0 +1,71 @@
+name: Debian package
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build .deb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check JavaScript
+        run: |
+          node --input-type=module --check < app/web/js/app.js
+          node --input-type=module --check < app/web/js/body.js
+
+      - name: Run tests
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m compileall -q app
+
+      - name: Determine package version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != *-* ]]; then
+              version="${version}-1"
+            fi
+          else
+            version="0.0.0+git${GITHUB_SHA::8}-1"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build Debian package
+        run: |
+          chmod +x packaging/build-deb.sh
+          packaging/build-deb.sh "${{ steps.version.outputs.value }}" dist
+          dpkg-deb --info dist/courier_*.deb
+          dpkg-deb --contents dist/courier_*.deb
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: courier-debian-${{ steps.version.outputs.value }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Attach package to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true

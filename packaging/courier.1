@@ -1,0 +1,62 @@
+.TH COURIER 1 "November 2026" "Courier 1.0" "User Commands"
+.SH NAME
+courier \- local Gmail client for Linux
+.SH SYNOPSIS
+.B courier
+.RB [ \-\-serve ]
+.RB [ \-\-data-dir
+.IR DIRECTORY ]
+.RB [ \-\-minimized ]
+.SH DESCRIPTION
+.B Courier
+is a desktop Gmail client built with Python, GTK 3, and WebKitGTK.
+It merges multiple Gmail accounts into one inbox and keeps mail data
+in a local SQLite database.
+.PP
+The first launch asks for a Google Desktop OAuth client in Settings.
+Mail is fetched from Gmail; the local HTTP server listens only on
+127.0.0.1.
+.SH OPTIONS
+.TP
+.B \-\-serve
+Run only the local HTTP server, without opening a GTK window.
+.TP
+.BI \-\-data-dir " DIRECTORY"
+Use a different runtime data directory instead of
+.IR ~/.local/share/courier .
+.TP
+.B \-\-minimized
+Start with only the tray icon visible.
+.TP
+.B \-h, \-\-help
+Show the command-line help and exit.
+.SH ENVIRONMENT
+.TP
+.B COURIER_DATA_DIR
+Overrides the runtime data directory.
+.TP
+.B COURIER_DEV=1
+Enables the WebKit inspector and console output.
+.TP
+.B COURIER_DEMO=1
+Skips Gmail sync. Intended for the sample database.
+.TP
+.B COURIER_GPU=1
+Leaves WebKit hardware acceleration enabled.
+.SH FILES
+.TP
+.I ~/.local/share/courier/courier.db
+SQLite database containing account metadata, OAuth tokens, cached
+mail, drafts, and settings.
+.TP
+.I ~/.local/share/courier/courier.log
+Sync and provider errors. Tokens are not written to the log.
+.TP
+.I ~/.config/autostart/courier.desktop
+Optional login entry created by Settings.
+.SH SEE ALSO
+The project home page:
+.UR https://github.com/joelis10/courier
+.UE
+.SH AUTHOR
+Joel Nod <joelis10@users.noreply.github.com>

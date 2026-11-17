@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Courier
+GenericName=Email Client
+Comment=Local Gmail client
+Exec=courier
+TryExec=courier
+Icon=courier
+Terminal=false
+Categories=Network;Email;
+Keywords=email;gmail;mail;
+StartupNotify=true
+StartupWMClass=Courier

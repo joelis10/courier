@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en" data-theme="fog" data-content-width="wide">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Courier</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/styles.css">
+<script src="/vendor/purify.min.js" defer></script>
+<script type="module" src="/js/app.js"></script>
+</head>
+<body>
+<div id="app" class="app" data-layout="split">
+  <aside id="sidebar" class="sidebar" aria-label="Mail folders and accounts">
+    <div class="sidebar-head">
+      <div class="brand">
+        <span id="brand-mark" class="brand-mark"></span>
+        <span class="brand-name">Courier</span>
+      </div>
+      <button id="sidebar-toggle" class="icon-btn sidebar-toggle" data-action="toggle-sidebar" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <span data-icon="sidebar"></span>
+      </button>
+    </div>
+
+    <div class="compose-wrap">
+      <button id="compose-btn" class="compose-btn" data-action="compose">
+        <span data-icon="compose"></span>
+        <span class="compose-label">Compose</span>
+      </button>
+    </div>
+
+    <nav id="folder-nav" class="folder-nav" aria-label="Mail folders"></nav>
+
+    <div class="accounts-block">
+      <div class="section-head">
+        <span class="section-title">Accounts</span>
+        <button class="icon-btn add-account-btn" data-action="add-account" aria-label="Add account" title="Add account">
+          <span data-icon="plus"></span>
+        </button>
+      </div>
+      <div id="account-list" class="account-list"></div>
+    </div>
+
+    <div class="sidebar-foot">
+      <button class="side-row settings-row" data-action="settings" aria-label="Settings" title="Settings">
+        <span class="side-row-icon" data-icon="settings"></span>
+        <span class="side-row-label">Settings</span>
+      </button>
+      <div id="sync-note" class="sync-note" aria-live="polite"></div>
+    </div>
+  </aside>
+
+  <div class="panel-resizer" data-resizer="sidebar" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize sidebar" title="Drag to resize sidebar"></div>
+
+  <div class="workspace">
+    <header class="topbar">
+      <form id="search-form" class="search-form" role="search">
+        <label class="search-well" for="search-input">
+          <span class="search-icon" data-icon="search"></span>
+          <input id="search-input" type="search" autocomplete="off" spellcheck="false" placeholder="Search mail" aria-label="Search mail">
+          <button type="button" id="search-clear" class="search-clear" aria-label="Clear search" title="Clear search" hidden><span data-icon="x"></span></button>
+        </label>
+      </form>
+      <div class="topbar-actions">
+        <div class="segmented" role="group" aria-label="Reading layout">
+          <button class="segment" data-layout="split" aria-label="Split view" title="Split view"><span data-icon="split"></span><span class="segment-label">Split</span></button>
+          <button class="segment" data-layout="reading" aria-label="Reading view" title="Reading view"><span data-icon="columns"></span><span class="segment-label">Reading</span></button>
+        </div>
+        <button id="refresh-btn" class="icon-btn topbar-btn" data-action="sync" aria-label="Check for mail" title="Check for mail">
+          <span data-icon="refresh"></span>
+        </button>
+      </div>
+    </header>
+
+    <main id="main" class="main">
+      <section id="list-pane" class="list-pane" aria-label="Message list">
+        <div class="list-head">
+          <div class="list-title-wrap">
+            <button id="list-back" class="icon-btn list-back" data-action="back-to-list" aria-label="Back to list" title="Back to list" hidden><span data-icon="back"></span></button>
+            <h1 id="list-title" class="list-title">Inbox</h1>
+            <span id="list-count" class="list-count"></span>
+          </div>
+          <div class="list-tools">
+            <button id="unread-filter" class="small-toggle" data-action="toggle-unread" aria-pressed="false" title="Show unread only">Unread</button>
+          </div>
+        </div>
+        <div id="sync-banner" class="sync-banner" hidden></div>
+        <div id="thread-scroll" class="thread-scroll">
+          <div id="thread-list" class="thread-list" role="listbox" aria-label="Threads"></div>
+          <div id="list-loading" class="list-loading" hidden><span class="spinner" aria-hidden="true"></span><span id="list-loading-text">Loading</span></div>
+          <div id="list-empty" class="list-empty" hidden></div>
+        </div>
+      </section>
+
+      <div class="panel-resizer" data-resizer="list" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize message list" title="Drag to resize message list"></div>
+
+      <section id="reader-pane" class="reader-pane" aria-label="Message">
+        <div id="reader" class="reader">
+          <div class="reader-empty">
+            <div class="reader-empty-icon" data-icon="mail"></div>
+            <p>Select a message</p>
+          </div>
+        </div>
+        <div id="composer" class="composer" hidden aria-label="Composer"></div>
+      </section>
+
+      <section id="settings-pane" class="settings-pane" hidden aria-label="Settings"></section>
+    </main>
+  </div>
+</div>
+
+<div id="toast-root" class="toast-root" aria-live="polite"></div>
+<div id="send-status" class="send-status" role="status" aria-live="polite" hidden></div>
+<div id="menu-root" class="menu-root" hidden></div>
+<div id="summary-popover" class="summary-popover" hidden aria-label="Summary">
+  <div class="summary-popover-head">
+    <span class="summary-title">Summary</span>
+    <button class="icon-btn" data-action="context-summary-close" aria-label="Close summary" title="Close summary" data-icon="x"></button>
+  </div>
+  <div class="summary-popover-body"></div>
+  <div class="summary-popover-actions"></div>
+</div>
+<div id="modal-root" class="modal-root" hidden></div>
+<div id="lightbox-root" class="lightbox-root" hidden></div>
+
+</body>
+</html>

@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Courier
+Source: https://github.com/joelis10/courier
+
+Files: *
+Copyright: 2026 Joel Nod <joelis10@users.noreply.github.com>
+License: all-rights-reserved
+ All rights reserved. No license is granted for reuse or redistribution.
