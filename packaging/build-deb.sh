@@ -37,6 +37,7 @@ install -m 644 "$ROOT/app/web/icon.svg" \
   "$PKG/usr/share/icons/hicolor/scalable/apps/courier.svg"
 gzip -9n -c "$ROOT/packaging/courier.1" > "$PKG/usr/share/man/man1/courier.1.gz"
 install -m 644 "$ROOT/README.md" "$PKG/usr/share/doc/courier/README.md"
+install -m 644 "$ROOT/LICENSE" "$PKG/usr/share/doc/courier/LICENSE"
 install -m 644 "$ROOT/packaging/copyright" "$PKG/usr/share/doc/courier/copyright"
 
 {

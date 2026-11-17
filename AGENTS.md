@@ -48,7 +48,7 @@ Demo data and UI screenshots live under `.dev/`, which is gitignored.
 - [x] Demo database and core tests
 - [x] Menus, search, unread filter, account filter, collapsed sidebar, keyboard shortcuts
 - [x] README, launcher installer, AGENTS notes
-- [x] Public GitHub repository, Debian package build, and tagged release workflow
+- [x] Public GitHub repository under MIT, Debian package build, and tagged release workflow
 - [x] Real-account use by the owner (OAuth, sync, summaries, real inbox content)
 - [ ] Tune signature detection against owner-provided examples if needed
 
@@ -111,6 +111,7 @@ by default to reduce memory; `COURIER_GPU=1` leaves it on.
 ## Architecture
 
 ```
+LICENSE          MIT license
 app/
   main.py        GTK window, WebKit settings, downloads, external links, server lifecycle
   server.py      local HTTP API, static files, page-token auth, OAuth callback, SSE AI proxy

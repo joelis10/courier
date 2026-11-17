@@ -2,6 +2,7 @@
 
 [![Debian package](https://github.com/joelis10/courier/actions/workflows/debian.yml/badge.svg)](https://github.com/joelis10/courier/actions/workflows/debian.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A local Gmail client for Linux. Multiple Gmail accounts share one inbox, mail renders in
 the system WebKitGTK view, and everything is stored on your machine. There is no bundled
@@ -440,6 +441,7 @@ COURIER_DATA_DIR="$PWD/.dev/demo-data" COURIER_DEMO=1 python3 -m app.main --serv
 
 ## Structure
 
+- `LICENSE` — the MIT license.
 - `app/` — Python backend, Gmail client, SQLite store, and web UI.
 - `tests/` — core tests and the demo database generator.
 - `packaging/` — Debian package builder, wrapper, desktop entry, and man page.
@@ -448,3 +450,10 @@ COURIER_DATA_DIR="$PWD/.dev/demo-data" COURIER_DEMO=1 python3 -m app.main --serv
 
 See `AGENTS.md` for the architecture, implementation notes, and where to tune signature
 detection if a sender's layout slips through.
+
+## License
+
+Courier is released under the [MIT License](LICENSE). You may use, copy, modify,
+publish, distribute, sublicense, and sell the software, provided the copyright notice
+and permission notice are included in copies or substantial portions. The software is
+provided as is, without warranty of any kind.
