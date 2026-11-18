@@ -142,7 +142,8 @@ packaging/
 .github/workflows/
   debian.yml      JS checks, tests, .deb artifact, release asset on v* tags
 docs/
-  courier.png     README screenshot, taken from the demo database
+  courier.png     main README screenshot, taken from the demo database
+  themes/         collapsed README theme-combination screenshots
 .dev/            ignored local demo DB, Chrome profile, helper scripts, screenshots
 ```
 

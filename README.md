@@ -10,6 +10,16 @@ Chromium, no Electron, no Node runtime, and no calendar.
 
 ![Courier showing a merged inbox and an open email thread](docs/courier.png)
 
+<details>
+<summary>More theme combinations</summary>
+
+| Window and email paper | Window and email paper |
+| :---: | :---: |
+| [![Linen window with Linen email paper](docs/themes/linen.png)](docs/themes/linen.png)<br>**Linen** window, **Linen** email | [![Sepia window with Sepia email paper](docs/themes/sepia.png)](docs/themes/sepia.png)<br>**Sepia** window, **Sepia** email |
+| [![Graphite window with Fog email paper](docs/themes/graphite-fog.png)](docs/themes/graphite-fog.png)<br>**Graphite** window, **Fog** email | [![Midnight window with Midnight email paper](docs/themes/midnight.png)](docs/themes/midnight.png)<br>**Midnight** window, **Midnight** email |
+
+</details>
+
 ## What it does
 
 - Merges any number of Gmail accounts into one inbox, with per-account colours, badges,
@@ -446,7 +456,7 @@ COURIER_DATA_DIR="$PWD/.dev/demo-data" COURIER_DEMO=1 python3 -m app.main --serv
 - `tests/` — core tests and the demo database generator.
 - `packaging/` — Debian package builder, wrapper, desktop entry, and man page.
 - `.github/workflows/debian.yml` — CI tests and package builds.
-- `docs/courier.png` — the screenshot above.
+- `docs/` — the main screenshot and the theme examples above.
 
 See `AGENTS.md` for the architecture, implementation notes, and where to tune signature
 detection if a sender's layout slips through.
