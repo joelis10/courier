@@ -27,14 +27,16 @@ Chromium, no Electron, no Node runtime, and no calendar.
 - Reads, searches, archives, stars, labels, and trashes mail without leaving the desktop.
 - Sends replies, reply-alls, forwards, and new messages with attachments and inline images.
 - Saves drafts to Gmail while you type and restores them with recipients and attachments.
+- Guides first-time Gmail setup with a step-by-step Google Cloud modal and client JSON
+  import, then verifies the granted scopes.
 - Folds signatures and quoted replies, blocks remote images by default, and renders each
   message in a sandboxed WebKit frame.
 - Keeps running in the tray, checks for new mail on a 10-second, 1-minute, or manual
   schedule, and sends desktop notifications with an optional one-line AI summary.
 - Has five client themes, five email content themes, resizable panes, split/reading/full
   screen views, and keyboard shortcuts.
-- Talks directly to any OpenAI-compatible endpoint for on-demand summaries. No AI feature
-  runs without a click.
+- Talks directly to any OpenAI-compatible endpoint for on-demand summaries. AI is off by
+  default, requires an explicit acknowledgement, and no summary runs without a click.
 
 Courier asks Google only for Gmail modify and send access. It does not request Calendar,
 Contacts, or Drive.
@@ -117,50 +119,40 @@ minutes or artifact storage on public repositories.
 
 ## Connect Gmail
 
-Courier does not ship a Google client secret. You create a desktop OAuth client for your
-own use. The current Google Cloud layout calls its consent configuration the **Google
-Auth platform**, with separate **Branding**, **Audience**, **Data Access**, and
-**Clients** pages.
+Courier does not ship a Google client secret. It uses a Desktop OAuth client created in
+your own Google Cloud project.
 
-1. Create a project in the [Google Cloud console](https://console.cloud.google.com/projectcreate).
-   Keep that project selected for the remaining steps.
-2. Open the [Gmail API page](https://console.cloud.google.com/apis/enableflow;apiid=gmail.googleapis.com)
-   in that project and select **Enable**.
-3. Open the [Google Auth platform](https://console.developers.google.com/auth/branding).
-   If it says the platform is not configured, select **Get started**. Enter an app name
-   and user support email, choose **External** for the user type, enter a contact email,
-   accept the user data policy, and select **Create**.
-4. Under **Audience**, add each Google address you will use to **Test users**.
-5. Under **Data Access**, select **Add or remove scopes**. Use **Manually add scopes**
-   to add:
-   - `https://www.googleapis.com/auth/gmail.modify`
-   - `https://www.googleapis.com/auth/gmail.send`
-   - `openid`
-   - `email`
-   - `profile`
+On first launch, Courier opens a six-step **Connect Gmail** guide. It links directly to
+the relevant Google Cloud pages and walks through:
 
-   The last three are standard sign-in scopes used only to read the account display
-   name for the From header. Save the scope selection. Existing accounts keep working;
-   use **Reconnect** in Settings or the account right-click menu to grant the new scopes
-   and fill the outgoing name.
-6. Under **Clients**, select **Create client**, choose **Desktop app**, give it a name,
-   and select **Create**. Copy the generated client ID and client secret.
-7. In Courier, open **Settings**. The client fields live inside **Google Cloud setup**.
-   Paste the client ID and client secret there, then select **Add Google account** above
-   that section.
+1. Create or select a Google Cloud project.
+2. Enable the Gmail API.
+3. Configure Google Auth platform branding and test users.
+4. Add the Gmail and sign-in scopes.
+5. Create a Desktop app OAuth client.
+6. Download and import the client JSON.
+
+The guide validates the imported JSON, rejects Web application clients, and checks the
+Desktop client fields. After the Google sign-in it verifies that the account granted the
+requested scopes; missing permissions are listed with a **Reconnect** action.
+
+Reopen the guide at any time from **Settings → Accounts → Open setup guide**. Importing a
+different JSON warns first that it will replace the configured client and that connected
+accounts may need to reconnect.
 
 Courier opens the consent screen in your default browser and receives the callback on a
 local loopback port. The callback port is generated when the app starts. Desktop OAuth
 clients accept loopback ports, so there is no redirect URI to configure by hand.
 
-Repeat step 7 for each Google account. Accounts share the unified inbox; every subject
-line carries a small badge with that account's username. Right-click an account in the
-sidebar and choose **Customize account**, or click **Edit** in Settings, to change its badge
-username, colour, **Outgoing name**, or default view. The outgoing name is the display
-name used in the From header for new messages; already-sent messages keep the name they
-were sent with. If recipients still see an old name, update **Send mail as** in Gmail's
-account settings as well. The full address is still shown in Settings and in the badge tooltip. The signed-in app can remain unverified while it is in
-Testing, and Google will show its usual warning for unverified apps.
+Accounts share the unified inbox; every subject line carries a small badge with that
+account's username. Right-click an account in the sidebar and choose **Customize account**,
+or click **Edit** in Settings, to change its badge username, colour, **Outgoing name**, or
+default view. The outgoing name is the display name used in the From header for new
+messages; already-sent messages keep the name they were sent with. If recipients still see
+an old name, update **Send mail as** in Gmail's account settings as well. The full address
+is still shown in Settings and in the badge tooltip. The signed-in app can remain
+unverified while it is in Testing, and Google will show its usual warning for unverified
+apps.
 
 Google expires refresh tokens after 7 days for external apps whose publishing status is
 Testing. Courier will flag the account as expired and Settings will offer Reconnect. To
@@ -169,8 +161,8 @@ avoid weekly reconnects, complete Branding and select **Publish app** on the
 verification. A Google Workspace project with an Internal user type avoids both the
 7-day limit and verification, but is only available inside a Workspace organization.
 
-Courier asks only for Gmail modify and send access. It does not request Calendar,
-Contacts, or Drive.
+Courier asks only for Gmail modify and send access, plus the basic OpenID profile used for
+the From name. It does not request Calendar, Contacts, or Drive.
 
 ## Refresh
 
@@ -363,28 +355,43 @@ body styles are also sanitised before rendering.
 
 ## AI summaries
 
+AI summaries are off by default. In **Settings → AI summaries**, turning on **Enable AI
+summaries** opens a confirmation that explains the data flow. Courier does not operate or
+control the endpoint you choose; you are responsible for that service, its privacy and
+retention terms, and the data you send to it.
+
+Only after that acknowledgement do the endpoint fields appear. Once the endpoint is
+configured, the toggle makes the **Summary** and **Summarize** actions available across
+Courier — the reader toolbar, thread menus, and the long-thread offer. Reader summaries are
+sent only after you choose one of those actions.
+
 Settings accepts any OpenAI-compatible endpoint: a base URL, a model name, and an optional
 API key. Examples include OpenAI, a local llama.cpp server, or Ollama's
 `http://localhost:11434/v1`.
 
-Summaries are requested only when you press **Summary** or choose a summary from a
-right-click menu. For a one-message thread the button summarizes that message directly;
-longer threads offer the whole thread, the latest message, or unread messages. Threads with
-five or more messages show a **Summarize** offer below the thread. The toolbar **Summary**
-button scrolls down to the summary panel when it appears. Messages you sent
-are labelled **You** in the prompt so the model does not describe your own actions in the
-third person. Courier removes signatures and quoted previous messages before building each
-prompt, so the model receives the sender, subject, and main message text. Notification AI
-summaries use the same cleaning. Summaries use short bullet points in the order events happened. A summary
-that fits without scrolling lets the thread scroll normally; only an overflowing summary
-traps the wheel. Requests go from the local backend straight to your endpoint. The key is
-kept in the local database and is never sent to the UI after it is saved.
+For a one-message thread the button summarizes that message directly; longer threads offer
+the whole thread, the latest message, or unread messages. Threads with five or more messages
+show a **Summarize** offer below the thread. The toolbar **Summary** button scrolls down to
+the summary panel when it appears. Messages you sent are labelled **You** in the prompt so
+the model does not describe your own actions in the third person. Courier removes
+signatures and quoted previous messages before building each prompt, so the model receives
+the sender, subject, and main message text. Summaries use short bullet points in the order
+events happened. A summary that fits without scrolling lets the thread scroll normally;
+only an overflowing summary traps the wheel. Requests go from the local backend straight to
+your endpoint. The key is kept in the local database and is never sent to the UI after it is
+saved.
+
+Notification summaries are the last option in the same AI section. They use the same
+endpoint and only run when both AI summaries and notification summaries are enabled. If the
+provider does not answer within eight seconds, the normal notification preview is shown.
+Notification summaries use the same signature and quote cleaning.
 
 Recent summaries are kept for 30 minutes in the running app, up to ten entries. Returning
 to a thread restores its last summary automatically; closing it with the X removes that
 cached entry.
 
-No summary is generated without a click.
+No reader summary is generated without a click. Notification summaries are optional and
+run automatically only when enabled for notifications.
 
 ## Data and security
 

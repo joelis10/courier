@@ -93,6 +93,14 @@ const ACCOUNT_COLORS = [
 const DARK_THEMES = new Set(["graphite", "midnight"]);
 const SUMMARY_CACHE_LIMIT = 10;
 const SUMMARY_CACHE_TTL = 30 * 60 * 1000;
+const GOOGLE_SETUP_STEPS = 6;
+const GOOGLE_OAUTH_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/gmail.send",
+  "openid",
+  "email",
+  "profile",
+];
 
 const DEFAULT_PREFS = {
   theme: "fog",
@@ -122,6 +130,8 @@ const DEFAULT_PREFS = {
   notifyBadgePosition: "before-subject",
   notifyUseAI: false,
   notifyAIMinChars: 400,
+  aiEnabled: false,
+  googleSetupSeen: false,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -213,6 +223,8 @@ const state = {
   summaryOffersDismissed: new Set(),
   lightbox: null,
   modalOpen: false,
+  googleSetup: null,
+  googleSetupKeyHandler: null,
   initialized: false,
   windowActive: null,
   accountSig: "",
@@ -978,6 +990,10 @@ function renderList() {
 /* Rendering: reader                                                          */
 /* -------------------------------------------------------------------------- */
 
+function aiSummariesEnabled() {
+  return Boolean(state.prefs.aiEnabled && state.settings.ai_configured);
+}
+
 function toolbarHtml(thread) {
   if (!thread) return "";
   const labels = new Set(thread.labels || []);
@@ -1006,8 +1022,12 @@ function toolbarHtml(thread) {
     </div>
     <div class="toolbar-spacer"></div>
     <div class="toolbar-group">
-      <button class="btn" data-action="summary-menu" title="Summarize" aria-haspopup="menu">Summary</button>
-      <span class="toolbar-divider" aria-hidden="true"></span>
+      ${
+        aiSummariesEnabled()
+          ? `<button class="btn" data-action="summary-menu" title="Summarize" aria-haspopup="menu">Summary</button>
+      <span class="toolbar-divider" aria-hidden="true"></span>`
+          : ""
+      }
       <button class="icon-btn ${thread.starred ? "starred" : ""}" data-action="star-thread" aria-label="${
         thread.starred ? "Unstar" : "Star"
       }" title="${thread.starred ? "Unstar" : "Star"}">${icon("star", 17)}</button>
@@ -1194,6 +1214,7 @@ function messageHtml(message, expanded, account) {
 }
 
 function summaryOfferHtml(thread, messages) {
+  if (!aiSummariesEnabled()) return "";
   if (!thread || !messages || messages.length < 5) return "";
   const key = threadKey(thread.account_id, thread.id);
   if (state.summary && state.summary.threadKey === key) return "";
@@ -1210,6 +1231,7 @@ function summaryOfferHtml(thread, messages) {
 }
 
 function summaryPanelHtml() {
+  if (!aiSummariesEnabled()) return "";
   const summary = state.summary;
   if (!summary) return "";
   const thread = currentThread();
@@ -1645,6 +1667,10 @@ function rememberSummary(summary) {
 }
 
 async function startSummary(scope, messageId = "", options = {}) {
+  if (!aiSummariesEnabled()) {
+    openSettings("ai");
+    return;
+  }
   const thread = currentThread();
   if (!thread) return;
   closeMenu();
@@ -1811,6 +1837,10 @@ function renderContextSummary() {
 }
 
 async function openContextSummary(thread, scope) {
+  if (!aiSummariesEnabled()) {
+    openSettings("ai");
+    return;
+  }
   if (!thread) return;
   const previousPosition =
     state.contextSummary && state.contextSummary.dragged
@@ -3975,7 +4005,6 @@ function renderSettings() {
   if (!state.settingsOpen) return;
   const scroll = pane.scrollTop;
   const settings = state.settings;
-  const missingClient = !settings.oauth_client_id;
   pane.innerHTML = `<header class="settings-head">
     <div class="settings-head-inner"><h1>Settings</h1></div>
   </header>
@@ -3988,34 +4017,18 @@ function renderSettings() {
           <button class="btn accent" data-action="oauth-connect">Add Google account</button>
           ${oauthStatusHtml()}
         </div>
-        <details class="setup-details" ${missingClient ? "open" : ""}>
-          <summary>Google Cloud setup</summary>
-          <ol>
-            <li>Create a project in the <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud console</a>. Keep that project selected for the remaining steps.</li>
-            <li>In that project, open <a href="https://console.cloud.google.com/apis/enableflow;apiid=gmail.googleapis.com" target="_blank" rel="noreferrer">Gmail API</a> and select Enable.</li>
-            <li>Open the <a href="https://console.developers.google.com/auth/branding" target="_blank" rel="noreferrer">Google Auth platform</a>. If it says not configured, select Get started. Enter an app name and support email, choose External, add a contact email, and accept the user data policy.</li>
-            <li>Under Audience, add each Google address you will use to Test users.</li>
-            <li>Under Data Access, select Add or remove scopes. Paste these two scope URLs into Manually add scopes, then save:</li>
-          </ol>
-          <p style="margin:4px 0 4px 20px"><code>https://www.googleapis.com/auth/gmail.modify</code><br><code>https://www.googleapis.com/auth/gmail.send</code></p>
-          <ol start="6">
-            <li>Under Clients, select Create client and choose Desktop app. Name it, select Create, then copy its client ID and client secret.</li>
-            <li>Paste them below. The Add Google account button above starts the sign-in.</li>
-          </ol>
-          <div class="field-grid">
-            <label for="oauth-client-id">Client ID</label>
-            <input id="oauth-client-id" type="text" autocomplete="off" spellcheck="false" value="${esc(
-              settings.oauth_client_id || ""
-            )}" placeholder="000000000000-xxxx.apps.googleusercontent.com">
+        <div class="setup-callout">
+          <div class="setup-callout-copy">
+            <strong>Google Cloud setup</strong>
+            <p>Courier uses your own Google Cloud OAuth client. Import the client JSON once; Courier never ships a client secret.</p>
+            <p class="settings-note">${
+              settings.oauth_client_configured
+                ? `Client configured: ${esc(settings.oauth_client_id)}`
+                : "No OAuth client imported yet."
+            }</p>
           </div>
-          <div class="field-grid">
-            <label for="oauth-client-secret">Client secret</label>
-            <input id="oauth-client-secret" type="password" autocomplete="off" spellcheck="false" placeholder="${
-              settings.oauth_client_secret_set ? "Saved" : "Client secret"
-            }">
-          </div>
-          <p class="setup-note">Testing apps receive 7-day refresh tokens. To avoid weekly reconnects, complete Branding and select Publish app on the Audience page. Moving to In production may require Google verification for the restricted Gmail scopes. Otherwise reconnect when Settings reports the sign-in expired.</p>
-        </details>
+          <button class="btn" data-action="google-setup-open">Open setup guide</button>
+        </div>
       </div>
     </section>
 
@@ -4200,24 +4213,6 @@ function renderSettings() {
             ])}
           </div>
         </div>
-        <div class="settings-cluster">
-          <div class="pref-row">
-            <div class="pref-row-label">Use AI summary</div>
-            <label class="switch"><input type="checkbox" data-pref="notifyUseAI" aria-label="Use AI summary in notifications" ${
-              state.prefs.notifyUseAI ? "checked" : ""
-            }><span class="switch-track"><span class="switch-knob"></span></span></label>
-          </div>
-          <p class="settings-note" id="notify-ai-note" ${state.prefs.notifyUseAI ? "" : "hidden"}>AI summaries use the configured endpoint. If it does not answer within eight seconds, the regular sender, subject, and preview notification is shown.</p>
-          <div class="pref-row" id="notify-ai-threshold" ${state.prefs.notifyUseAI ? "" : "hidden"}>
-            <div class="pref-row-label">Only when longer than</div>
-            <div class="notify-threshold">
-              <input id="notify-ai-chars" type="number" min="80" max="5000" step="50" value="${Number(
-                state.prefs.notifyAIMinChars
-              ) || 400}" aria-label="Minimum characters for AI notification">
-              <span>characters</span>
-            </div>
-          </div>
-        </div>
         <div class="pref-row">
           <div class="pref-row-label">Test notification</div>
           <button class="btn" data-action="notify-test">Send test</button>
@@ -4242,6 +4237,24 @@ function renderSettings() {
     <section class="settings-section" data-section="ai">
       <h2>AI summaries</h2>
       <div class="settings-group">
+        <div class="settings-warning">
+          <strong>Third-party endpoint</strong>
+          <p>AI summaries send the selected email text to the endpoint you configure. Courier does not operate or control that service. You are responsible for the endpoint, its privacy and retention terms, and the data you choose to share.</p>
+        </div>
+        <div class="pref-row">
+          <div class="pref-row-label">Enable AI summaries</div>
+          <label class="switch"><input id="ai-enabled-toggle" type="checkbox" data-pref="aiEnabled" aria-label="Enable AI summaries" ${
+            state.prefs.aiEnabled ? "checked" : ""
+          }><span class="switch-track"><span class="switch-knob"></span></span></label>
+        </div>
+        <p class="settings-note">${
+          state.prefs.aiEnabled
+            ? "Once the endpoint below is configured, this makes the <strong>Summary</strong> and <strong>Summarize</strong> actions available across Courier."
+            : "Turn this on to reveal the endpoint fields. Once configured, the Summary and Summarize actions appear across Courier."
+        } Reader summaries are sent only when you choose one.</p>
+        ${
+          state.prefs.aiEnabled
+            ? `
         <div class="field-grid">
           <label for="ai-base-url">Base URL</label>
           <input id="ai-base-url" type="url" autocomplete="off" spellcheck="false" value="${esc(
@@ -4270,6 +4283,32 @@ function renderSettings() {
           }
           ${aiStatusHtml()}
         </div>
+        ${
+          settings.ai_configured
+            ? ""
+            : `<p class="settings-note">Set the endpoint, model, and API key to use summaries.</p>`
+        }
+        <div class="settings-cluster">
+          <div class="pref-row">
+            <div class="pref-row-label">Use AI summary in notifications</div>
+            <label class="switch"><input type="checkbox" data-pref="notifyUseAI" aria-label="Use AI summary in notifications" ${
+              state.prefs.notifyUseAI ? "checked" : ""
+            }><span class="switch-track"><span class="switch-knob"></span></span></label>
+          </div>
+          <p class="settings-note" id="notify-ai-note" ${state.prefs.notifyUseAI ? "" : "hidden"}>New-message notifications use the same endpoint and run automatically when enabled. If it does not answer within eight seconds, the regular sender, subject, and preview notification is shown.</p>
+          <div class="pref-row" id="notify-ai-threshold" ${state.prefs.notifyUseAI ? "" : "hidden"}>
+            <div class="pref-row-label">Only when longer than</div>
+            <div class="notify-threshold">
+              <input id="notify-ai-chars" type="number" min="80" max="5000" step="50" value="${Number(
+                state.prefs.notifyAIMinChars
+              ) || 400}" aria-label="Minimum characters for AI notification">
+              <span>characters</span>
+            </div>
+          </div>
+        </div>
+        `
+            : ""
+        }
       </div>
     </section>
   </div>`;
@@ -4285,8 +4324,8 @@ function renderSettings() {
       }
       const input =
         state.settingsFocus === "ai"
-          ? $("#ai-base-url", pane)
-          : $("#oauth-client-id", pane);
+          ? $("#ai-base-url", pane) || $("#ai-enabled-toggle", pane)
+          : $('[data-action="google-setup-open"]', pane);
       if (input) setTimeout(() => input.focus({ preventScroll: true }), 20);
     }
     state.settingsFocus = null;
@@ -4620,8 +4659,14 @@ async function refreshState(options = {}) {
     if (!exists) state.labelName = null;
   }
   renderSidebar();
-  if (!state.accounts.length && !state.settingsOpen && state.initialized) {
-    openSettings("accounts");
+  if (
+    !state.accounts.length &&
+    !state.settingsOpen &&
+    !state.googleSetup &&
+    state.initialized
+  ) {
+    if (!state.prefs.googleSetupSeen) openGoogleSetup({ firstRun: true });
+    else openSettings("accounts");
   }
   refreshButtonUi();
 
@@ -4996,7 +5041,7 @@ async function openThread(accountId, threadId, options = {}) {
       labels: data.thread.labels || [],
       message_count: messages.length,
     });
-    state.summary = cachedSummary(data.thread);
+    state.summary = aiSummariesEnabled() ? cachedSummary(data.thread) : null;
     renderReader({
       resetScroll: true,
       settle: true,
@@ -5226,27 +5271,29 @@ function openThreadContextMenu(thread, x, y) {
   const labels = new Set(thread.labels || []);
   const attrs = `data-account="${esc(thread.account_id)}" data-thread="${esc(thread.id)}"`;
   const items = [];
-  if (thread.message_count <= 1) {
-    items.push({
-      label: "Summarize",
-      action: "context-summary-all",
-      icon: "summary",
-      attrs,
-    });
-  } else {
-    items.push({
-      label: "Summarize all",
-      action: "context-summary-all",
-      icon: "summary",
-      attrs,
-    });
-    if (thread.unread) {
+  if (aiSummariesEnabled()) {
+    if (thread.message_count <= 1) {
       items.push({
-        label: "Summarize unread",
-        action: "context-summary-unread",
+        label: "Summarize",
+        action: "context-summary-all",
         icon: "summary",
         attrs,
       });
+    } else {
+      items.push({
+        label: "Summarize all",
+        action: "context-summary-all",
+        icon: "summary",
+        attrs,
+      });
+      if (thread.unread) {
+        items.push({
+          label: "Summarize unread",
+          action: "context-summary-unread",
+          icon: "summary",
+          attrs,
+        });
+      }
     }
   }
   items.push({
@@ -5420,7 +5467,9 @@ function threadMenu(anchor) {
   if (!labels.has("TRASH")) {
     items.push({ label: "Delete", action: "trash-thread", icon: "trash" });
   }
-  items.push({ label: "Summarize thread", action: "summary-thread", icon: "rows" });
+  if (aiSummariesEnabled()) {
+    items.push({ label: "Summarize thread", action: "summary-thread", icon: "rows" });
+  }
   items.push({
     label: "Copy debug content",
     action: "thread-debug-copy",
@@ -5430,6 +5479,10 @@ function threadMenu(anchor) {
 }
 
 function summaryMenu(anchor) {
+  if (!aiSummariesEnabled()) {
+    openSettings("ai");
+    return;
+  }
   const thread = currentThread();
   if (!thread) return;
   const messages = currentMessages();
@@ -5739,6 +5792,452 @@ function showModal({
 }
 
 /* -------------------------------------------------------------------------- */
+/* Google Cloud setup                                                        */
+/* -------------------------------------------------------------------------- */
+
+function shortClientId(value) {
+  const text = String(value || "");
+  if (text.length <= 48) return text;
+  return `${text.slice(0, 22)}…${text.slice(-22)}`;
+}
+
+function missingOAuthScopes(account) {
+  const granted = new Set(
+    String(account && account.scope ? account.scope : "")
+      .split(/\s+/)
+      .filter(Boolean)
+  );
+  if (!granted.size) return [];
+  return GOOGLE_OAUTH_SCOPES.filter((scope) => !granted.has(scope));
+}
+
+function oauthScopeLabel(scope) {
+  if (scope === "https://www.googleapis.com/auth/gmail.modify") {
+    return "Read and manage Gmail";
+  }
+  if (scope === "https://www.googleapis.com/auth/gmail.send") {
+    return "Send mail";
+  }
+  if (scope === "openid" || scope === "email" || scope === "profile") {
+    return "Basic Google profile";
+  }
+  return scope;
+}
+
+function setGoogleSetupStatus(html, error = false) {
+  if (!state.googleSetup) return;
+  state.googleSetup.status = { html, error };
+  const host = $("#google-setup-status");
+  if (host) {
+    host.innerHTML = html;
+    host.classList.toggle("error", error);
+  }
+}
+
+function googleSetupVisual(step) {
+  const shots = [
+    ["/setup/project.png", "Google Cloud New Project form"],
+    ["/setup/gmail-api.png", "Gmail API page with the Enable button"],
+    ["/setup/auth-branding.png", "Google Auth Platform App Information form"],
+    ["/setup/data-access.png", "Data access page with Gmail and profile scopes"],
+    ["/setup/create-client.png", "Create OAuth client form with Desktop app selected"],
+    ["/setup/client-created.png", "OAuth client created dialog with Download JSON"],
+  ];
+  const [src, alt] = shots[step] || shots[0];
+  return `<figure class="setup-shot"><img src="${src}" alt="${esc(
+    alt
+  )}" loading="lazy"></figure>`;
+}
+
+function googleSetupImportHtml(setup) {
+  return `
+    <p class="setup-copy">In the <strong>OAuth client created</strong> dialog, select <strong>Download JSON</strong>. Import that file here. Courier reads the client ID and secret and stores them in the local database.</p>
+    <div class="setup-import-row">
+      <button class="btn" data-action="google-setup-choose-json">Choose JSON file</button>
+      <span class="settings-note">or paste the downloaded JSON below</span>
+    </div>
+    <textarea id="oauth-json-input" class="setup-json" spellcheck="false" autocomplete="off" placeholder='{ "installed": { "client_id": "…", "client_secret": "…" } }'>${esc(
+      setup.jsonText || ""
+    )}</textarea>
+    ${
+      setup.startedConfigured && !setup.imported && !setup.confirmReplace
+        ? `<p class="settings-note setup-existing-note">A client is already configured. Importing another will replace it, and accounts connected with the old client may need to reconnect.</p>`
+        : ""
+    }
+    ${
+      setup.confirmReplace
+        ? `<div class="setup-notice warning">
+        <strong>Replace the configured client?</strong>
+        <p>Accounts connected with the current client may need to reconnect before they can refresh mail.</p>
+        <div class="setup-inline-actions">
+          <button class="btn danger" data-action="google-setup-import-replace">Replace client</button>
+          <button class="btn" data-action="google-setup-import-cancel">Cancel</button>
+        </div>
+      </div>`
+        : `<div class="setup-inline-actions">
+        <button class="btn accent" data-action="google-setup-import">Import client</button>
+      </div>`
+    }
+    ${
+      setup.importError
+        ? `<p class="settings-status error">${esc(setup.importError)}</p>`
+        : ""
+    }
+    ${
+      setup.imported
+        ? `<div class="setup-status success"><strong>Client imported</strong><span>${esc(
+            shortClientId(state.settings.oauth_client_id)
+          )}</span></div>`
+        : ""
+    }
+    <div id="google-setup-status" class="settings-status ${
+      setup.status && setup.status.error ? "error" : ""
+    }" aria-live="polite">${setup.status ? setup.status.html : ""}</div>
+    ${
+      setup.imported
+        ? `<div class="setup-connect">
+        <div class="setup-subhead">Connect a Google account</div>
+        <p class="settings-note">${
+          setup.connected
+            ? setup.accountCount > 1
+              ? `${setup.accountCount} accounts are connected.`
+              : `${esc(
+                  setup.accountEmail || "The account"
+                )} is connected.`
+            : "Connect one Gmail account now. Courier will request Gmail access and the basic profile needed for the From name."
+        }</p>
+        ${
+          setup.connected
+            ? setup.missingScopes && setup.missingScopes.length
+              ? `<div class="setup-notice warning"><strong>Permissions missing</strong><p>The account did not grant every requested scope:</p><ul>${setup.missingScopes
+                  .map((scope) => `<li>${esc(oauthScopeLabel(scope))}</li>`)
+                  .join("")}</ul><p>Add the scopes in Google Cloud, then reconnect and grant them.</p></div>`
+              : ""
+            : setup.connecting
+              ? `<p class="settings-note">Waiting for Google sign-in. <a href="${esc(
+                  state.oauthUrl || "#"
+                )}" target="_blank" rel="noreferrer">Open the Google sign-in page</a></p>`
+              : `<p class="settings-note">Use <strong>Connect account</strong> below when you are ready.</p>`
+        }
+      </div>`
+        : ""
+    }
+    ${
+      setup.complete
+        ? `<div class="setup-status success setup-complete"><strong>Setup complete</strong><span>Courier can now read and send Gmail for this account.</span></div>`
+        : ""
+    }
+  `;
+}
+
+function googleSetupStepContent(step, setup) {
+  if (step === 5) {
+    return `<h2 class="setup-title">Import the client JSON</h2>
+      ${googleSetupImportHtml(setup)}`;
+  }
+  const steps = [
+    {
+      title: "Create a Google Cloud project",
+      copy: "Courier connects to Gmail through an OAuth client in your own Google Cloud project. Create one project for Courier and keep it selected for the remaining steps.",
+      bullets: [
+        "Open the project picker.",
+        "Choose New project.",
+        "Name it Courier Setup Guide and create it.",
+      ],
+      link: "https://console.cloud.google.com/projectcreate",
+      linkLabel: "Open project creation",
+    },
+    {
+      title: "Enable the Gmail API",
+      copy: "Open the Gmail API page inside the project you just created and select Enable. Courier cannot read or send mail until this API is enabled.",
+      bullets: [
+        "Use the same project from the first step.",
+        "Select Enable.",
+        "Return here when Google says the API is enabled.",
+      ],
+      link: "https://console.cloud.google.com/apis/enableflow;apiid=gmail.googleapis.com",
+      linkLabel: "Open Gmail API",
+    },
+    {
+      title: "Set up the Google Auth platform",
+      copy: "Google needs a consent screen before it will issue tokens. Branding names the app; Audience controls who can sign in while the app is in testing.",
+      bullets: [
+        "Branding: enter an app name and support email, choose External, add a contact email.",
+        "Audience: add every Gmail address you will connect as a Test user.",
+        "Testing apps issue 7-day refresh tokens. Publishing avoids that, but public use may require Google verification.",
+      ],
+      link: "https://console.cloud.google.com/auth/branding",
+      linkLabel: "Open Google Auth platform",
+      secondaryLink: "https://console.cloud.google.com/auth/audience",
+      secondaryLabel: "Open Audience",
+    },
+    {
+      title: "Add the Gmail scopes",
+      copy: "Open Data Access, choose Add or remove scopes, and paste these into Manually add scopes. Save the selection before leaving the page.",
+      bullets: [],
+      link: "https://console.cloud.google.com/auth/scopes",
+      linkLabel: "Open Data Access",
+      scopes: true,
+    },
+    {
+      title: "Create a Desktop OAuth client",
+      copy: "Open Clients, choose Create client, select Desktop app, name it Courier Desktop, and select Create. Do not choose Web application.",
+      bullets: [
+        "Application type: Desktop app.",
+        "The client ID and secret are generated together.",
+        "Download the JSON on the next step.",
+      ],
+      link: "https://console.cloud.google.com/auth/clients",
+      linkLabel: "Open Clients",
+    },
+  ];
+  const item = steps[step];
+  if (!item) return "";
+  const scopeBlock = item.scopes
+    ? `<div class="setup-scope-block">
+      <div class="setup-scope-head"><span>Scopes to add</span><button type="button" class="link-btn" data-action="google-setup-copy-scopes">Copy</button></div>
+      <code>${GOOGLE_OAUTH_SCOPES.join("<br>")}</code>
+    </div>`
+    : "";
+  return `<h2 class="setup-title">${item.title}</h2>
+    <p class="setup-copy">${item.copy}</p>
+    ${
+      item.bullets && item.bullets.length
+        ? `<ul class="setup-bullets">${item.bullets
+            .map((bullet) => `<li>${bullet}</li>`)
+            .join("")}</ul>`
+        : ""
+    }
+    ${scopeBlock}
+    <div class="setup-link-row">
+      <a class="btn accent" href="${item.link}" target="_blank" rel="noreferrer">${item.linkLabel}</a>
+      ${
+        item.secondaryLink
+          ? `<a class="btn" href="${item.secondaryLink}" target="_blank" rel="noreferrer">${item.secondaryLabel}</a>`
+          : ""
+      }
+    </div>`;
+}
+
+function renderGoogleSetup() {
+  const setup = state.googleSetup;
+  if (!setup) return;
+  const root = $("#modal-root");
+  if (!root) return;
+  const step = setup.step;
+  const nextLabel = step === 4 ? "Continue to import" : "Next";
+  const footerPrimary =
+    step < 5
+      ? `<button class="btn accent" data-action="google-setup-next">${nextLabel}</button>`
+      : setup.complete
+        ? `<button class="btn accent" data-action="google-setup-done">Done</button>`
+        : setup.connected && setup.missingScopes.length
+          ? `<button class="btn accent" data-action="google-setup-reconnect">Reconnect</button>`
+          : setup.imported && !setup.connected && !setup.confirmReplace
+            ? `<button class="btn accent" data-action="google-setup-connect" ${
+                setup.connecting ? "disabled" : ""
+              }>Connect account</button>`
+            : `<button class="btn" data-action="google-setup-close">Close</button>`;
+  root.hidden = false;
+  root.innerHTML = `<div class="modal-backdrop google-setup-backdrop"></div>
+    <div class="modal-sheet google-setup" role="dialog" aria-modal="true" aria-labelledby="google-setup-title">
+      <header class="google-setup-head">
+        <div>
+          <h1 id="google-setup-title">Connect Gmail</h1>
+          <p>Use your own Google Cloud OAuth client. Courier keeps the credentials and mail data on this machine.</p>
+        </div>
+        <button class="icon-btn" data-action="google-setup-close" aria-label="Close setup" title="Close">${icon(
+          "x",
+          16
+        )}</button>
+      </header>
+      <div class="setup-progress">
+        <span>Step ${step + 1} of ${GOOGLE_SETUP_STEPS}</span>
+        <div class="setup-dots" aria-hidden="true">${Array.from(
+          { length: GOOGLE_SETUP_STEPS },
+          (_, index) =>
+            `<span class="${index <= step ? "done" : ""} ${
+              index === step ? "current" : ""
+            }"></span>`
+        ).join("")}</div>
+      </div>
+      <div class="google-setup-body">
+        <div class="setup-instructions">${googleSetupStepContent(step, setup)}</div>
+        ${googleSetupVisual(step)}
+      </div>
+      <footer class="google-setup-foot">
+        <button class="link-btn" data-action="google-setup-skip" ${
+          step === 5 ? "hidden" : ""
+        }>Skip to import</button>
+        <span class="toolbar-spacer"></span>
+        ${
+          step > 0
+            ? `<button class="btn" data-action="google-setup-back">Back</button>`
+            : ""
+        }
+        ${footerPrimary}
+      </footer>
+    </div>`;
+  const backdrop = $(".google-setup-backdrop", root);
+  if (backdrop) backdrop.addEventListener("click", closeGoogleSetup);
+  if (state.googleSetupKeyHandler) {
+    document.removeEventListener("keydown", state.googleSetupKeyHandler, true);
+  }
+  state.googleSetupKeyHandler = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeGoogleSetup();
+  };
+  document.addEventListener("keydown", state.googleSetupKeyHandler, true);
+  requestAnimationFrame(() => {
+    const primary = $(".google-setup-foot .btn.accent", root);
+    if (primary) primary.focus({ preventScroll: true });
+  });
+}
+
+function openGoogleSetup(options = {}) {
+  if (state.googleSetup) {
+    if (Number.isInteger(options.step)) {
+      state.googleSetup.step = Math.max(
+        0,
+        Math.min(GOOGLE_SETUP_STEPS - 1, options.step)
+      );
+      renderGoogleSetup();
+    }
+    return;
+  }
+  if (state.modalOpen) return;
+  state.modalOpen = true;
+  state.googleSetup = {
+    step: Number.isInteger(options.step) ? Math.max(0, Math.min(5, options.step)) : 0,
+    firstRun: Boolean(options.firstRun),
+    imported: Boolean(state.settings.oauth_client_configured),
+    startedConfigured: Boolean(state.settings.oauth_client_configured),
+    connecting: false,
+    connected: false,
+    accountId: "",
+    accountEmail: "",
+    accountCount: 0,
+    missingScopes: [],
+    complete: false,
+    importError: "",
+    jsonText: "",
+    confirmReplace: false,
+    pendingJson: "",
+    knownAccountIds: new Set(state.accounts.map((account) => account.id)),
+    status: null,
+  };
+  if (state.settings.oauth_client_configured && state.accounts.length) {
+    const missing = new Set();
+    for (const account of state.accounts) {
+      for (const scope of missingOAuthScopes(account)) missing.add(scope);
+    }
+    state.googleSetup.connected = true;
+    state.googleSetup.accountId =
+      state.accounts.length === 1 ? state.accounts[0].id : "";
+    state.googleSetup.accountEmail =
+      state.accounts.length === 1 ? state.accounts[0].email : "";
+    state.googleSetup.accountCount = state.accounts.length;
+    state.googleSetup.missingScopes = Array.from(missing);
+    state.googleSetup.complete =
+      state.googleSetup.imported && missing.size === 0;
+  }
+  renderGoogleSetup();
+}
+
+function closeGoogleSetup() {
+  if (!state.googleSetup) return;
+  const firstRun = state.googleSetup.firstRun;
+  state.googleSetup = null;
+  state.modalOpen = false;
+  if (state.googleSetupKeyHandler) {
+    document.removeEventListener("keydown", state.googleSetupKeyHandler, true);
+    state.googleSetupKeyHandler = null;
+  }
+  const root = $("#modal-root");
+  if (root) {
+    root.hidden = true;
+    root.innerHTML = "";
+  }
+  if (!state.prefs.googleSetupSeen) {
+    state.prefs.googleSetupSeen = true;
+    savePrefs();
+  }
+  if (firstRun && !state.accounts.length) {
+    openSettings("accounts");
+  }
+}
+
+async function chooseOAuthJson() {
+  if (!state.googleSetup) return;
+  try {
+    const data = await api("/api/choose-oauth-json", {
+      method: "POST",
+      body: {},
+    });
+    const field = $("#oauth-json-input");
+    if (field) field.value = data.text || "";
+    state.googleSetup.importError = "";
+    state.googleSetup.jsonText = data.text || "";
+    renderGoogleSetup();
+  } catch (error) {
+    if (error.message === "No file selected.") return;
+    state.googleSetup.importError = `${error.message || "Could not open the file chooser."} Paste the JSON below instead.`;
+    renderGoogleSetup();
+  }
+}
+
+async function importOAuthJson(text) {
+  if (!state.googleSetup) return;
+  const setup = state.googleSetup;
+  try {
+    const data = await api("/api/oauth/import", {
+      method: "POST",
+      body: { json: text },
+    });
+    state.settings = Object.assign({}, state.settings, data.settings || {});
+    setup.imported = true;
+    setup.confirmReplace = false;
+    setup.pendingJson = "";
+    setup.jsonText = "";
+    setup.importError = "";
+    setup.connected = false;
+    setup.complete = false;
+    setup.accountId = "";
+    setup.accountEmail = "";
+    setup.accountCount = 0;
+    setup.missingScopes = [];
+    setup.status = null;
+    renderGoogleSetup();
+  } catch (error) {
+    setup.importError = error.message || "Could not import that JSON.";
+    renderGoogleSetup();
+  }
+}
+
+async function submitOAuthJson() {
+  const setup = state.googleSetup;
+  if (!setup) return;
+  const field = $("#oauth-json-input");
+  const text = field ? field.value.trim() : "";
+  if (!text) {
+    setup.importError = "Paste the downloaded OAuth client JSON first.";
+    renderGoogleSetup();
+    return;
+  }
+  setup.jsonText = text;
+  if (state.settings.oauth_client_configured && !setup.confirmReplace) {
+    setup.confirmReplace = true;
+    setup.pendingJson = text;
+    setup.importError = "";
+    renderGoogleSetup();
+    return;
+  }
+  await importOAuthJson(text);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Search                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -5792,35 +6291,54 @@ function clearSearch(load = true) {
 /* OAuth flow                                                                 */
 /* -------------------------------------------------------------------------- */
 
-async function beginOAuth() {
+async function beginOAuth(options = {}) {
+  const setupMode = Boolean(options.setup);
   const idInput = $("#oauth-client-id");
   const secretInput = $("#oauth-client-secret");
-  const clientId = idInput ? idInput.value.trim() : "";
+  const clientId = idInput
+    ? idInput.value.trim()
+    : state.settings.oauth_client_id || "";
   const clientSecret = secretInput ? secretInput.value.trim() : "";
+  const report = setupMode ? setGoogleSetupStatus : setOAuthStatus;
   if (!clientId || (!clientSecret && !state.settings.oauth_client_secret_set)) {
-    const details = idInput?.closest("details");
-    if (details) details.open = true;
-    setOAuthStatus(
-      !clientId ? "Paste a client ID first." : "Paste a client secret first.",
-      true
-    );
-    (!clientId ? idInput : secretInput)?.focus();
+    if (setupMode && state.googleSetup) {
+      state.googleSetup.importError =
+        "Import a Desktop OAuth client JSON before connecting.";
+      state.googleSetup.step = GOOGLE_SETUP_STEPS - 1;
+      renderGoogleSetup();
+    } else {
+      openGoogleSetup();
+    }
     return;
   }
-  setOAuthStatus("Starting Google sign-in.", false);
+  if (setupMode && state.googleSetup) {
+    state.googleSetup.connecting = true;
+    state.googleSetup.connected = false;
+    state.googleSetup.missingScopes = [];
+    state.googleSetup.complete = false;
+    state.googleSetup.status = { html: "Starting Google sign-in.", error: false };
+    renderGoogleSetup();
+  } else {
+    report("Starting Google sign-in.", false);
+  }
   try {
+    const body =
+      clientId && (clientSecret || !state.settings.oauth_client_secret_set)
+        ? { client_id: clientId, client_secret: clientSecret }
+        : {};
     const data = await api("/api/oauth/start", {
       method: "POST",
-      body: { client_id: clientId, client_secret: clientSecret },
+      body,
     });
     state.oauthUrl = data.url;
     state.oauthPending = true;
     const wasEmpty = state.accounts.length === 0;
     state.oauthWasEmpty = wasEmpty;
-    setOAuthStatus(
+    report(
       `Waiting for Google sign-in. <a href="${esc(
         data.url
-      )}" target="_blank" rel="noreferrer">Open Google sign-in</a>`
+      )}" target="_blank" rel="noreferrer">Open Google sign-in</a>`,
+      false
     );
     try {
       window.open(data.url, "_blank", "noopener");
@@ -5829,15 +6347,58 @@ async function beginOAuth() {
     }
     state.settings.oauth_client_id = clientId;
     state.settings.oauth_client_secret_set = true;
-    pollOAuth(wasEmpty);
+    state.settings.oauth_client_configured = true;
+    if (setupMode && state.googleSetup) renderGoogleSetup();
+    pollOAuth(wasEmpty, { setup: setupMode });
   } catch (error) {
-    setOAuthStatus(esc(error.message || "Could not start Google sign-in."), true);
+    if (setupMode && state.googleSetup) {
+      state.googleSetup.connecting = false;
+      state.googleSetup.status = {
+        html: esc(error.message || "Could not start Google sign-in."),
+        error: true,
+      };
+      renderGoogleSetup();
+    } else {
+      setOAuthStatus(
+        esc(error.message || "Could not start Google sign-in."),
+        true
+      );
+    }
   }
 }
 
-function pollOAuth(wasEmpty = false) {
+function pollOAuth(wasEmpty = false, options = {}) {
+  const setupMode = Boolean(options.setup);
   if (state.oauthTimer) clearTimeout(state.oauthTimer);
   const deadline = Date.now() + 5 * 60 * 1000;
+  const finishSetup = (connectedEmail) => {
+    if (!state.googleSetup) return;
+    const known = state.googleSetup.knownAccountIds || new Set();
+    const found =
+      state.accounts.find(
+        (item) => connectedEmail && item.email === connectedEmail
+      ) ||
+      state.accounts.find((item) => !known.has(item.id)) ||
+      state.accounts[state.accounts.length - 1] ||
+      null;
+    const missing = found ? missingOAuthScopes(found) : [];
+    state.googleSetup.connecting = false;
+    state.googleSetup.connected = Boolean(found);
+    state.googleSetup.accountId = found ? found.id : "";
+    state.googleSetup.accountEmail = found ? found.email : connectedEmail;
+    state.googleSetup.accountCount = found ? 1 : 0;
+    state.googleSetup.missingScopes = missing;
+    state.googleSetup.complete = Boolean(
+      state.googleSetup.imported && found && missing.length === 0
+    );
+    state.googleSetup.status = found
+      ? null
+      : {
+          html: "Google sign-in completed, but the account was not found.",
+          error: true,
+        };
+    renderGoogleSetup();
+  };
   const tick = async () => {
     if (!state.oauthPending && !state.oauthUrl) return;
     try {
@@ -5845,12 +6406,17 @@ function pollOAuth(wasEmpty = false) {
       if (data.status === "connected") {
         state.oauthPending = false;
         state.oauthUrl = "";
+        const connectedEmail = data.account && data.account.email;
         await refreshState({ quiet: true });
-        setOAuthStatus("Account connected.");
-        toast("Google account connected");
-        if (state.settingsOpen) renderSettings();
+        if (setupMode && state.googleSetup) {
+          finishSetup(connectedEmail || "");
+        } else {
+          setOAuthStatus("Account connected.");
+          toast("Google account connected");
+          if (state.settingsOpen) renderSettings();
+        }
         await loadThreads({ quiet: true });
-        if (wasEmpty) {
+        if (wasEmpty && !setupMode) {
           setTimeout(() => {
             if (state.settingsOpen) closeSettings();
           }, 500);
@@ -5860,12 +6426,26 @@ function pollOAuth(wasEmpty = false) {
       if (data.status === "error") {
         state.oauthPending = false;
         state.oauthUrl = "";
-        setOAuthStatus(esc(data.error || "Google sign-in failed."), true);
+        const message = esc(data.error || "Google sign-in failed.");
+        if (setupMode && state.googleSetup) {
+          state.googleSetup.connecting = false;
+          state.googleSetup.status = { html: message, error: true };
+          renderGoogleSetup();
+        } else {
+          setOAuthStatus(message, true);
+        }
         return;
       }
       if (Date.now() > deadline) {
         state.oauthPending = false;
-        setOAuthStatus("Google sign-in timed out. Try again.", true);
+        const message = "Google sign-in timed out. Try again.";
+        if (setupMode && state.googleSetup) {
+          state.googleSetup.connecting = false;
+          state.googleSetup.status = { html: message, error: true };
+          renderGoogleSetup();
+        } else {
+          setOAuthStatus(message, true);
+        }
         return;
       }
       state.oauthTimer = setTimeout(tick, 1300);
@@ -5906,7 +6486,10 @@ async function saveAISettings(options = {}) {
       keyInput.value = "";
       keyInput.placeholder = data.ai_api_key_set ? "Saved" : "API key";
     }
-    if (!options.silent) setAIStatus("Saved.");
+    if (!options.silent) {
+      setAIStatus("Saved.");
+      if (state.settingsOpen) renderSettings();
+    }
     return true;
   } catch (error) {
     setAIStatus(esc(error.message || "Could not save."), true);
@@ -6441,6 +7024,62 @@ async function handleAction(element, event) {
       syncThemeSelection();
       return;
     }
+    case "google-setup-open":
+      openGoogleSetup();
+      return;
+    case "google-setup-close":
+      closeGoogleSetup();
+      return;
+    case "google-setup-done":
+      closeGoogleSetup();
+      return;
+    case "google-setup-next":
+      if (state.googleSetup) {
+        state.googleSetup.step = Math.min(
+          GOOGLE_SETUP_STEPS - 1,
+          state.googleSetup.step + 1
+        );
+        renderGoogleSetup();
+      }
+      return;
+    case "google-setup-back":
+      if (state.googleSetup) {
+        state.googleSetup.step = Math.max(0, state.googleSetup.step - 1);
+        renderGoogleSetup();
+      }
+      return;
+    case "google-setup-skip":
+      if (state.googleSetup) {
+        state.googleSetup.step = GOOGLE_SETUP_STEPS - 1;
+        renderGoogleSetup();
+      }
+      return;
+    case "google-setup-copy-scopes":
+      await copyText(GOOGLE_OAUTH_SCOPES.join("\n"));
+      toast("Copied the Gmail scopes");
+      return;
+    case "google-setup-choose-json":
+      await chooseOAuthJson();
+      return;
+    case "google-setup-import":
+      await submitOAuthJson();
+      return;
+    case "google-setup-import-replace":
+      if (state.googleSetup && state.googleSetup.pendingJson) {
+        await importOAuthJson(state.googleSetup.pendingJson);
+      }
+      return;
+    case "google-setup-import-cancel":
+      if (state.googleSetup) {
+        state.googleSetup.confirmReplace = false;
+        state.googleSetup.pendingJson = "";
+        renderGoogleSetup();
+      }
+      return;
+    case "google-setup-connect":
+    case "google-setup-reconnect":
+      await beginOAuth({ setup: true });
+      return;
     case "oauth-connect":
       await beginOAuth();
       return;
@@ -6974,6 +7613,27 @@ function bindEvents() {
       savePrefs();
       return;
     }
+    if (target.matches("input[data-pref='aiEnabled']")) {
+      if (target.checked) {
+        target.checked = false;
+        const accepted = await showModal({
+          title: "Enable AI summaries?",
+          message:
+            "AI summaries send the selected email text to the endpoint you configure. Courier does not operate or control that service. You are responsible for the endpoint, its privacy and retention terms, and the data you choose to share. Only enable this with a provider you trust.",
+          confirmLabel: "I understand",
+          cancelLabel: "Cancel",
+        });
+        if (!accepted) return;
+        state.prefs.aiEnabled = true;
+      } else {
+        state.prefs.aiEnabled = false;
+        closeSummary();
+        closeContextSummary();
+      }
+      savePrefs();
+      renderSettings();
+      return;
+    }
     if (target.matches("input[data-pref]")) {
       const key = target.dataset.pref;
       state.prefs[key] = target.checked;
@@ -7369,7 +8029,8 @@ async function init() {
   );
   renderAll();
   if (!state.accounts.length) {
-    openSettings("accounts");
+    if (!state.prefs.googleSetupSeen) openGoogleSetup({ firstRun: true });
+    else openSettings("accounts");
   } else {
     await loadThreads();
     schedulePoll(5000);

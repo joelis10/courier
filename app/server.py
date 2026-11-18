@@ -66,6 +66,8 @@ UI_PREF_DEFAULTS = {
     "notifyBadgePosition": "before-subject",
     "notifyUseAI": False,
     "notifyAIMinChars": 400,
+    "aiEnabled": False,
+    "googleSetupSeen": False,
 }
 UI_BOOLEAN_PREFS = {
     "hideSignatures",
@@ -76,6 +78,8 @@ UI_BOOLEAN_PREFS = {
     "notifyArchived",
     "notifyShowAccount",
     "notifyUseAI",
+    "aiEnabled",
+    "googleSetupSeen",
 }
 
 
@@ -239,6 +243,7 @@ class App:
         self.open_attachment_file = None
         self.download_attachment = None
         self.choose_attachments = None
+        self.choose_oauth_json = None
 
     # ------------------------------------------------------------------ util
 
@@ -257,6 +262,10 @@ class App:
         return {
             "oauth_client_id": self.store.get_setting("oauth_client_id") or "",
             "oauth_client_secret_set": bool(self.store.get_setting("oauth_client_secret")),
+            "oauth_client_configured": bool(
+                self.store.get_setting("oauth_client_id")
+                and self.store.get_setting("oauth_client_secret")
+            ),
             "ai_base_url": self.store.get_setting("ai_base_url") or "",
             "ai_model": self.store.get_setting("ai_model") or "",
             "ai_api_key_set": bool(self.store.get_setting("ai_api_key")),
@@ -278,6 +287,7 @@ class App:
             if "default_view_id" in row.keys()
             else None,
             "last_sync": row["last_sync"] or 0,
+            "scope": row["scope"] if "scope" in row.keys() else "",
             "unread": counts.get("unread", 0),
             "inbox_unread": counts.get("inbox_unread", 0),
             "folders": counts.get("folders", {}),
@@ -526,6 +536,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return
                 if url.path == "/api/oauth/start":
                     self._oauth_start(payload)
+                    return
+                if url.path == "/api/oauth/import":
+                    self._import_oauth_client(payload)
+                    return
+                if url.path == "/api/choose-oauth-json":
+                    self._choose_oauth_json()
                     return
                 if url.path == "/api/ai/test":
                     self._ai_test()
@@ -1382,6 +1398,72 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------------ oauth
 
+    def _import_oauth_client(self, payload: dict[str, Any]) -> None:
+        raw = payload.get("json")
+        if raw is not None:
+            if not isinstance(raw, str) or not raw.strip():
+                raise ApiError("Paste the downloaded OAuth client JSON.", 400)
+            if len(raw) > 65536:
+                raise ApiError("That JSON file is too large.", 400)
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise ApiError("That file is not valid JSON.", 400) from exc
+            if not isinstance(data, dict):
+                raise ApiError("That JSON does not describe an OAuth client.", 400)
+            if isinstance(data.get("web"), dict):
+                raise ApiError(
+                    "That is a Web application client. Create a Desktop app client instead.",
+                    400,
+                )
+            source = data.get("installed")
+            if not isinstance(source, dict):
+                source = data if "client_id" in data else None
+            if not isinstance(source, dict):
+                raise ApiError(
+                    "This JSON is missing the Desktop app client details.", 400
+                )
+            client_id = str(source.get("client_id") or "").strip()
+            client_secret = str(source.get("client_secret") or "").strip()
+        else:
+            client_id = str(payload.get("client_id") or "").strip()
+            client_secret = str(payload.get("client_secret") or "").strip()
+        if not client_id.endswith(".apps.googleusercontent.com"):
+            raise ApiError("That does not look like a Google OAuth client ID.", 400)
+        if not client_secret:
+            raise ApiError("That JSON is missing the client secret.", 400)
+        self.app.store.set_setting("oauth_client_id", client_id)
+        self.app.store.set_setting("oauth_client_secret", client_secret)
+        self._send_json(
+            {
+                "settings": self.app.public_settings(),
+                "client_type": "desktop",
+            }
+        )
+
+    def _choose_oauth_json(self) -> None:
+        chooser = self.app.choose_oauth_json
+        if not chooser:
+            raise ApiError(
+                "The file chooser is only available in the desktop app. Paste the JSON instead.",
+                400,
+            )
+        path_value = chooser()
+        if not path_value:
+            raise ApiError("No file selected.", 400)
+        path = Path(path_value)
+        if path.suffix.lower() != ".json":
+            raise ApiError("Choose the .json file downloaded from Google Cloud.", 400)
+        try:
+            if path.stat().st_size > 65536:
+                raise ApiError("That JSON file is too large.", 400)
+            text = path.read_text(encoding="utf-8")
+        except ApiError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise ApiError("Could not read that JSON file.", 400) from exc
+        self._send_json({"name": path.name, "text": text})
+
     def _oauth_start(self, payload: dict[str, Any]) -> None:
         store = self.app.store
         client_id = str(payload.get("client_id") or store.get_setting("oauth_client_id") or "").strip()
@@ -1520,6 +1602,8 @@ class ApiHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ AI
 
     def _ai_test(self) -> None:
+        if not _load_ui_prefs(self.app.store).get("aiEnabled"):
+            raise ApiError("Enable AI summaries in Settings first.", 400)
         try:
             result = self.app.ai.test()
         except AIError as exc:
@@ -1528,6 +1612,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._send_json({"result": result})
 
     def _ai_summarize(self, payload: dict[str, Any]) -> None:
+        if not _load_ui_prefs(self.app.store).get("aiEnabled"):
+            raise ApiError("Enable AI summaries in Settings first.", 400)
         if not self.app.ai.configured():
             raise ApiError("AI summaries are not configured.", 400)
         account_id = str(payload.get("account") or "")

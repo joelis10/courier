@@ -484,6 +484,50 @@ def run_gui(app: App, minimized: bool = False) -> int:
         done.wait(timeout=300)
         return result.get("files", [])
 
+    def choose_oauth_json() -> str:
+        result: dict[str, str] = {}
+        done = threading.Event()
+
+        def show() -> bool:
+            dialog = None
+            try:
+                dialog = Gtk.FileChooserDialog(
+                    title="Import Google OAuth client",
+                    transient_for=window,
+                    action=Gtk.FileChooserAction.OPEN,
+                )
+                dialog.add_buttons(
+                    "Cancel",
+                    Gtk.ResponseType.CANCEL,
+                    "Import",
+                    Gtk.ResponseType.ACCEPT,
+                )
+                json_filter = Gtk.FileFilter()
+                json_filter.set_name("OAuth client JSON")
+                json_filter.add_pattern("*.json")
+                dialog.add_filter(json_filter)
+                downloads = GLib.get_user_special_dir(
+                    GLib.UserDirectory.DIRECTORY_DOWNLOAD
+                )
+                if downloads and Path(downloads).is_dir():
+                    dialog.set_current_folder(downloads)
+                response = dialog.run()
+                result["path"] = ""
+                if response == Gtk.ResponseType.ACCEPT:
+                    result["path"] = dialog.get_filename() or ""
+            except Exception as exc:
+                app.log(f"OAuth JSON chooser failed: {exc!r}")
+                result["path"] = ""
+            finally:
+                if dialog is not None:
+                    dialog.destroy()
+                done.set()
+            return False
+
+        GLib.idle_add(show)
+        done.wait(timeout=300)
+        return result.get("path", "")
+
     def open_attachment_file(path: Path, filename: str) -> bool:
         GLib.idle_add(lambda: launch_attachment(path, filename) or False)
         return True
@@ -492,6 +536,7 @@ def run_gui(app: App, minimized: bool = False) -> int:
     app.open_attachment_file = open_attachment_file
     app.download_attachment = download_attachment
     app.choose_attachments = choose_attachments
+    app.choose_oauth_json = choose_oauth_json
 
     def on_file_chooser(_webview, request):
         dialog = None

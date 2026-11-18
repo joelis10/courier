@@ -11,7 +11,7 @@ from pathlib import Path
 
 from app.ai import clean_email_body
 from app.notifications import NotificationMonitor
-from app.server import _outgoing_name
+from app.server import _clean_ui_prefs, _outgoing_name
 from app.gmail import (
     GmailClient,
     build_mime,
@@ -958,6 +958,20 @@ class AIBodyCleanTests(unittest.TestCase):
         )
 
 
+class UIPrefsTests(unittest.TestCase):
+    def test_ai_and_google_setup_are_off_by_default(self):
+        prefs = _clean_ui_prefs({})
+        self.assertFalse(prefs["aiEnabled"])
+        self.assertFalse(prefs["googleSetupSeen"])
+
+    def test_ai_and_google_setup_booleans_are_preserved(self):
+        prefs = _clean_ui_prefs(
+            {"aiEnabled": True, "googleSetupSeen": True}
+        )
+        self.assertTrue(prefs["aiEnabled"])
+        self.assertTrue(prefs["googleSetupSeen"])
+
+
 class OutgoingNameTests(unittest.TestCase):
     def test_profile_name_from_id_token(self):
         payload = base64.urlsafe_b64encode(
@@ -1065,6 +1079,28 @@ class NotificationTests(unittest.TestCase):
         self.monitor._dispatch(thread, self.prefs)
         self.assertEqual(notified, [])
         self.monitor._dispatch(thread, self.prefs | {"notifyArchived": True})
+        self.assertEqual(notified, ["thread-1"])
+
+    def test_ai_notifications_require_the_main_ai_toggle(self):
+        self.app.store.get_account = lambda _id: {
+            "email": "joel@example.com",
+            "username": "Joel",
+        }
+        notified = []
+        self.monitor._notify = lambda thread, _prefs, _summary: notified.append(
+            thread["id"]
+        )
+        thread = {
+            "account_id": "acc-1",
+            "id": "thread-1",
+            "labels": ["INBOX"],
+            "unread": True,
+            "last_from_email": "ana@example.com",
+        }
+        self.monitor._dispatch(
+            thread,
+            self.prefs | {"notifyUseAI": True, "aiEnabled": False},
+        )
         self.assertEqual(notified, ["thread-1"])
 
     def test_own_message_in_an_inbox_thread_is_ignored(self):

@@ -78,6 +78,7 @@ app/
     js/app.js    UI state, rendering, events, composer, settings, menus, lightbox
     js/body.js   sanitising, signature/quote detection, per-fragment iframes, images
     js/icons.js  inline SVG icon set
+    setup/       cropped Google Cloud screenshots for the setup guide
     sounds/soft-knock.wav  bundled default notification sound
     vendor/purify.min.js
 tests/
@@ -106,9 +107,29 @@ docs/
   port. The redirect URI is the loopback root, `http://127.0.0.1:<port>`, which Google
   accepts for Desktop clients. The callback can also be served at `/oauth/callback`.
 - Scopes: `https://www.googleapis.com/auth/gmail.modify` and
-  `https://www.googleapis.com/auth/gmail.send`. Keep the Google Cloud app in Testing
-  and add the account addresses as test users. Google issues 7-day refresh tokens for
-  external apps in Testing; README and in-app setup both mention this.
+  `https://www.googleapis.com/auth/gmail.send`, plus `openid`, `email`, and `profile`.
+  Keep the Google Cloud app in Testing and add the account addresses as test users.
+  Google issues 7-day refresh tokens for external apps in Testing; the setup guide and
+  README both mention this.
+- Google setup is a six-step modal, not a wall of Settings fields. It opens on first
+  launch while `googleSetupSeen` is false and reopens from **Settings → Accounts → Open
+  setup guide**. It deep-links to project creation, Gmail API, Google Auth platform
+  Branding/Audience/Data Access, and Clients, with an actual Google Cloud screenshot for
+  each step. The screenshot assets live in `app/web/setup/`. The support email is replaced
+  with `you@example.com`; client IDs and secrets are redacted. Never commit real account
+  emails, client IDs, or secrets in these images. Replace the screenshots when Google
+  changes the console; do not add CSS mockups back. Step 6
+  imports the Desktop client JSON. `POST /api/oauth/import` validates the `installed`
+  object (rejecting `web`), the client ID suffix, and the client secret.
+  `POST /api/choose-oauth-json` uses a native GTK chooser in the desktop app; the paste
+  box is the browser/server-only fallback. Replacing an existing client warns first and
+  can require connected accounts to reconnect.
+- `account_public` exposes the stored `scope`. After Google sign-in, the setup modal checks
+  it against `GOOGLE_OAUTH_SCOPES` and lists missing permissions with a **Reconnect**
+  action in the setup footer. Setup is complete only after a client is imported, an account
+  is connected, and no scopes are missing. The setup modal blocks the automatic Settings
+  open while it is visible; closing it sets `googleSetupSeen` and, on first run, opens
+  Settings → Accounts.
 - Google moved consent configuration to the **Google Auth platform**: Branding,
   Audience, Data Access, and Clients. Setup copy follows the official
   Google Workspace guides. The old "OAuth consent screen" labels are
@@ -219,6 +240,14 @@ docs/
   `renderList` hides read threads again as soon as `selectedKey` clears. Leaving the reader
   removes the row immediately and reloads the unread list; opening another thread drops the
   previous one. Do not reload an unread list without preserving the selected thread.
+- AI summaries are gated by `aiEnabled` plus a configured endpoint, and are off by default.
+  While either is missing, hide the toolbar **Summary** button, thread-list context summary
+  items, reader overflow summary item, the five-message offer, and cached summary
+  restoration. Turning it on requires the
+  responsibility acknowledgement modal; only then do the endpoint/model/key fields render.
+  Turning it off closes open summaries. The AI section warning must remain visible even
+  when the fields are hidden. Notification AI controls live at the bottom of the AI section,
+  not in Notifications.
 - Settings is a page in `.main`, not an overlay. It hides the list and reader, marks the
   Settings sidebar row active, and dismisses when Inbox, All Accounts, a folder, a label,
   search, or Compose is used. The header is full width and has no back button.
@@ -256,6 +285,10 @@ docs/
   separators, common closers, and contact-only signature tails. Quote-only forwards fall
   back to the original so the summary is not empty. Notification AI summaries use the same
   cleaner; do not read `body_text` directly there.
+- AI endpoint/test requests are rejected server-side when `aiEnabled` is false.
+  `notifications.py` requires `aiEnabled`, `notifyUseAI`, and a configured endpoint before
+  using an AI notification summary. The notification monitor falls back to the normal
+  sender/subject/preview when any of those is missing or the provider fails.
 - The AI system prompt asks for short ordered bullet points rather than paragraphs, and
   tells the model to stop after the factual summary when nothing is required; the thread
   prompt no longer asks for a general action note. The UI also strips trailing "No action
@@ -481,12 +514,14 @@ docs/
 - Notification preferences are `notifyEnabled`, `notifyArchived`, `notifySound`,
   `notifySoundPath`, `notifyShowAccount`, `notifyBadgePosition`, `notifyUseAI`, and
   `notifyAIMinChars`. `notifyArchived` defaults to false; archived threads without
-  `INBOX` stay quiet until it is enabled.
+  `INBOX` stay quiet until it is enabled. `notifyUseAI` is ineffective unless the separate
+  `aiEnabled` preference is on.
   `POST /api/notify/test` increments a setting counter; the GUI monitor notices it and
   sends a synthetic long notification using the current formatting and sound.
 - Related notification rows use `.settings-cluster` so dependent controls share one
   container without internal borders. The AI length row is hidden unless `notifyUseAI`
-  is on; the account-placement row is hidden unless `notifyShowAccount` is on.
+  is on; the account-placement row is hidden unless `notifyShowAccount` is on. The whole
+  notification AI cluster is hidden unless the main `aiEnabled` toggle is on.
 - The notification uses the `suppress-sound` hint so the desktop daemon does not play its
   own sound over Courier's chosen sound. `notifyVolume` (0–100) is applied by `ffplay`
   first because PulseAudio/PipeWire stream restore can reset `paplay`/`pw-play` stream
@@ -547,20 +582,22 @@ CI runs the same tests and JavaScript syntax checks before building the package.
 Debian workflow uses the standard Ubuntu 24.04 GitHub-hosted runner, which is free for
 public repositories. Pushing a `v*` tag attaches the built `.deb` to a GitHub Release.
 
-The 35 tests cover thread metadata extraction, plain-text fallback, inline/attachment
+The 38 tests cover thread metadata extraction, plain-text fallback, inline/attachment
 parsing, MIME construction, folder counting/archive/drafts semantics, thread label updates,
 account metadata, refresh intervals, user-label merging and label paging, folder paging,
 older-page fetching with Gmail page tokens, notification default actions, archived-mail
 filtering, self-sent filtering, outgoing-name and ID-token fallbacks, AI signature/quote
-cleaning, contact name resolution, custom view filtering/default clearing, and a full sync
-plus lazy thread load using a fake Gmail client. UI smoke tests
+cleaning, AI and Google-setup preference defaults, AI notification gating, contact name
+resolution, custom view filtering/default clearing, and a full sync plus lazy thread load
+using a fake Gmail client. UI smoke tests
 cover custom account names/colours, the four badge and label positions, wide/full reader
 widths, header clicks, entity decoding, summary scope and scroll containment, labels/Show
 more, custom view creation/filtering/default view, draft filtering/no empty reply drafts,
 the draft trash confirmation, reply recipient name preservation/contact enrichment, the
 composer attachment shelf and its View/Delete actions, the attachment-mention prompt,
-Settings navigation, context menus, the summary popover, the mailto copy menu, and the image
-viewer.
+Settings navigation, the six-step Google setup modal, client JSON import and replacement
+confirmation, missing-scope warnings, AI acknowledgement and summary-action gating, context
+menus, the summary popover, the mailto copy menu, and the image viewer.
 
 Demo workflow:
 

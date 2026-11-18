@@ -145,7 +145,7 @@ class NotificationMonitor:
         ).lower()
         if sender and sender == (account["email"] or "").lower():
             return
-        if prefs.get("notifyUseAI") and self.app.ai.configured():
+        if prefs.get("aiEnabled") and prefs.get("notifyUseAI") and self.app.ai.configured():
             worker = threading.Thread(
                 target=self._ai_worker,
                 args=(thread, prefs),
@@ -394,7 +394,7 @@ class NotificationMonitor:
                 "screenshots are still pointing at the old domain."
             ),
         }
-        if prefs.get("notifyUseAI") and self.app.ai.configured():
+        if prefs.get("aiEnabled") and prefs.get("notifyUseAI") and self.app.ai.configured():
             worker = threading.Thread(
                 target=self._ai_test_worker,
                 args=(thread, prefs),
