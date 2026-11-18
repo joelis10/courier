@@ -3,59 +3,10 @@
 A local Gmail client for Linux. Python backend, system WebKitGTK window, no bundled
 Chromium, no Electron, no calendar.
 
-## Where things stand
-
-**Status: feature complete. The owner has connected real Gmail accounts and supplied
-issue reports from real use. This version adds persisted preferences, account-nested
-user labels, paged fetching, read/unread and spam context actions, summary caching and
-ordered bullet prompts, resizable panes, separate email content themes, a full Settings
-page, inline-image viewing, notification click-through to the source thread, stable
-thread opening, recipient suggestions, send progress, Gmail drafts, and "You" labelling
-for AI summaries. Chrome smoke tests
-cover the new flows; native WebKitGTK checks cover the shell, context menus, summaries,
-and image rendering.**
-
-The local desktop launcher was installed on 2026-11-12. The owner's real database is
-`~/.local/share/courier/courier.db`. Do not run tests or the demo against that path.
-Demo data and UI screenshots live under `.dev/`, which is gitignored.
-
-- [x] GTK WebKit shell, external links, attachment opening, no packaged browser
-- [x] Local HTTP API and SQLite store
-- [x] Google OAuth desktop loopback flow with PKCE, on the app's own random port
-- [x] Gmail metadata sync, history sync, lazy body loading, search
-- [x] Thread actions: read/unread, star, archive, spam, trash, untrash, labels, state
-- [x] Sending replies, reply-all, forwards, new mail, attachments
-- [x] Merge multiple accounts with custom username badges and account colours
-- [x] Split, reading, and full-screen views; full-width reader toolbar; message width setting
-- [x] Account badge and label chip placement: before/after sender or subject
-- [x] Custom per-account views with label/sender/subject filters and a default view
-- [x] Gmail drafts, contact suggestions, undo/redo, send progress
-- [x] Archive notification preference and mailto address copy
-- [x] Signature and quoted-text folding, hidden by default
-- [x] Docked reply tray and side writing panel, content preserved across mode changes
-- [x] Clickable message headers, spaced per-message action buttons
-- [x] Five backgrounds, accent presets and custom accent
-- [x] On-demand AI summaries of a thread or one message, streamed
-- [x] Context-aware summary menus, pointer-position popovers, and a 5+ message offer
-- [x] Near-real-time Gmail history polling, configurable 10s / 1min / manual
-- [x] User labels merged across accounts, five visible before Show more
-- [x] Paged list loading as the reader scrolls, with Gmail page tokens for older mail
-- [x] Right-click menus for threads and accounts, replacing the default WebKit page menu
-- [x] Settings as a full page with an active sidebar row and no back button
-- [x] UI preferences stored in the database and injected before first paint
-- [x] Full-screen inline-image viewer with a carousel and zoom
-- [x] In-app confirmation and link dialogs; no reliance on browser dialogs
-- [x] Demo database and core tests
-- [x] Menus, search, unread filter, account filter, collapsed sidebar, keyboard shortcuts
-- [x] README, launcher installer, AGENTS notes
-- [x] Public GitHub repository under MIT, Debian package build, and tagged release workflow
-- [x] Real-account use by the owner (OAuth, sync, summaries, real inbox content)
-- [ ] Tune signature detection against owner-provided examples if needed
-
 ## Run
 
 ```sh
-cd /home/joel/Documents/email-client
+cd courier
 ./run.sh
 ```
 
@@ -94,17 +45,16 @@ Runtime data lives in `~/.local/share/courier/` (`courier.db`, `courier.log`). O
 with `COURIER_DATA_DIR`. The database holds accounts, OAuth tokens, cached mail, and
 settings. Directory mode is 0700, database 0600.
 
-Do not put development data under `/tmp`; the machine may clear it when the session
-restarts. Project-local development artifacts live under `.dev/` (ignored by
-`.gitignore`).
+Do not put development data under `/tmp`; it may be cleared when the session restarts.
+Project-local development artifacts live under `.dev/` (ignored by `.gitignore`).
 
 ## Requirements and platform
 
-- Debian 12 / LMDE 6 (the current machine is LMDE 6 with WebKitGTK 2.50).
+- Debian 12 / LMDE 6 with WebKitGTK 2.50 or newer.
 - Python 3.11+ with `gi`, GTK 3.24, WebKit2 4.1.
 - No pip packages, no Node build step, no npm runtime dependencies.
 
-Memory footprint on the test machine is roughly 300 MB PSS total across the Python
+Memory footprint is roughly 300 MB PSS total across the Python
 process and its WebKitWebProcess. WebKit hardware acceleration is deliberately disabled
 by default to reduce memory; `COURIER_GPU=1` leaves it on.
 
@@ -151,17 +101,17 @@ docs/
 
 - The HTTP server binds only to `127.0.0.1` and uses a random per-run page token.
   API routes require `X-Courier-Token` (or `t=` for image/attachment GETs).
-- OAuth uses a Desktop app client created by the owner. The auth flow generates
+- OAuth uses a Desktop app client created by the user. The auth flow generates
   state + PKCE, opens the default browser, and listens on the app's random loopback
   port. The redirect URI is the loopback root, `http://127.0.0.1:<port>`, which Google
   accepts for Desktop clients. The callback can also be served at `/oauth/callback`.
 - Scopes: `https://www.googleapis.com/auth/gmail.modify` and
   `https://www.googleapis.com/auth/gmail.send`. Keep the Google Cloud app in Testing
-  and add the owner's addresses as test users. Google issues 7-day refresh tokens for
+  and add the account addresses as test users. Google issues 7-day refresh tokens for
   external apps in Testing; README and in-app setup both mention this.
 - Google moved consent configuration to the **Google Auth platform**: Branding,
-  Audience, Data Access, and Clients. Setup copy was verified against the official
-  Google Workspace guides on 2026-11-12. The old "OAuth consent screen" labels are
+  Audience, Data Access, and Clients. Setup copy follows the official
+  Google Workspace guides. The old "OAuth consent screen" labels are
   wrong; account setup uses Branding > Get started, Audience > Test users,
   Data Access > Add or remove scopes, and Clients > Create client > Desktop app.
   There is no redirect URI field to fill for a Desktop app.
@@ -244,7 +194,7 @@ docs/
   mode splits horizontally and hides the list pane so the message remains readable.
   Composer content is preserved when switching modes or minimizing.
 - Signatures and quotes are hidden behind explicit `Show signature` / `Show quoted
-  text` rows. This is the owner's most important feature; never regress it.
+  text` rows. This is a core feature; never regress it.
 - Summaries push content down in their own panel, with no decorative AI chrome. The
   summary body traps wheel scroll at its boundaries so overscroll does not move the
   email thread.
@@ -449,7 +399,7 @@ docs/
   HTML/text of every message, selected/resolved main theme, plain-text classification for
   the whole message and the main fragment, per-fragment signature/quote themes, and
   signature/quote detection previews. Keep this diagnostic action when changing body
-  rendering; it is how the owner reports missed signatures and theme problems.
+  rendering; it is how users report missed signatures and theme problems.
 - Opening a thread keeps its toolbar, subject, account badge, and message count visible
   while a spinner occupies only the thread body area. The body stays `visibility: hidden`
   until every rendered message frame has loaded, measured, and settled its images; then
@@ -496,7 +446,7 @@ docs/
   paper. A plain main message follows the selected email content theme, which may be dark,
   even when a folded signature or quoted reply contains designed HTML.
 - The GTK window is placed against the right edge of the X screen after mapping so the
-  owner can keep other work on the left. This is a one-time placement, not a window
+  user can keep other work on the left. This is a one-time placement, not a window
   manager replacement; the user can still move it.
 - Reading mode without a selected thread makes the list pane fill the workspace; the
   reader pane is hidden. Selecting a thread switches back to the full-width reader.
@@ -576,7 +526,7 @@ Located in `app/web/js/body.js`.
   it would leave no readable main content.
 - `visibleText()` treats `<br>` and block ends as newlines, important for closers that
   arrive as `<p>Thanks,<br>Joel</p>`.
-- When the owner supplies real examples, add fixtures and tune closer/tail heuristics
+- When users supply real examples, add fixtures and tune closer/tail heuristics
   here. Keep the guard that requires content before a fold.
 - `findInlineCloserBoundary` handles closers such as "Many thanks" inside one large
   Gmail `<div>`, where the closer is a text line after a `<br>` rather than its own block.
