@@ -214,6 +214,11 @@ docs/
   and reconnect. Marking the open thread unread closes the reader so no thread is selected,
   and updates cached message labels so the unread-summary option stays truthful. Inputs and
   editable fields keep the native edit menu.
+- The unread-only list keeps the open thread visible and selected after it is marked read.
+  `withPinnedUnreadThread` re-inserts the selected summary after each unread fetch, and
+  `renderList` hides read threads again as soon as `selectedKey` clears. Leaving the reader
+  removes the row immediately and reloads the unread list; opening another thread drops the
+  previous one. Do not reload an unread list without preserving the selected thread.
 - Settings is a page in `.main`, not an overlay. It hides the list and reader, marks the
   Settings sidebar row active, and dismisses when Inbox, All Accounts, a folder, a label,
   search, or Compose is used. The header is full width and has no back button.
@@ -566,9 +571,10 @@ COURIER_DATA_DIR="$PWD/.dev/demo-data" COURIER_DEMO=1 python3 -m app.main --serv
 
 UI smoke tests used headless Chrome against the demo server plus the native GTK window.
 Verified in Chrome: account-nested labels and Show more, zero-thread label visibility,
-account-label boot-out, read/unread/spam context menu entries, local scroll paging,
-Settings navigation and full-width header, accent selection ring, Settings focus scroll
-containment, thread/account context menus, single-message and thread/unread summaries with
+account-label boot-out, read/unread/spam context menu entries, unread-list pinning while
+reading, local scroll paging, Settings navigation and full-width header, accent selection
+ring, Settings focus scroll containment, thread/account context menus, single-message and
+thread/unread summaries with
 "You" in the prompt, summary cache restore/discard and trailing-boilerplate cleanup,
 short-summary scroll pass-through, draggable summary popovers with click-away, account
 collapse on switch, hidden single-account badges, resizable panes, email content themes,

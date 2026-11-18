@@ -851,7 +851,14 @@ function renderList() {
       ? view.name
       : state.labelName || folderById(state.folder).label;
   $("#list-title").textContent = title;
-  const total = state.unreadOnly ? state.threads.length : currentFolderTotal();
+  const visibleThreads = state.unreadOnly
+    ? state.threads.filter(
+        (thread) => thread.unread || thread.key === state.selectedKey
+      )
+    : state.threads;
+  const total = state.unreadOnly
+    ? visibleThreads.length
+    : currentFolderTotal();
   $("#list-count").textContent = total ? String(total) : "";
 
   const unreadButton = $("#unread-filter");
@@ -859,7 +866,7 @@ function renderList() {
   unreadButton.title = state.unreadOnly ? "Show all" : "Show unread only";
 
   const list = $("#thread-list");
-  list.innerHTML = state.threads
+  list.innerHTML = visibleThreads
     .map((thread) => {
       const account = accountFor(thread.account_id);
       const selected = state.selectedKey === thread.key;
@@ -928,14 +935,14 @@ function renderList() {
 
   const loading = $("#list-loading");
   const empty = $("#list-empty");
-  const showLoading = state.listLoading && state.threads.length === 0;
+  const showLoading = state.listLoading && visibleThreads.length === 0;
   loading.hidden = !showLoading;
   if (showLoading) {
     $("#list-loading-text").textContent = state.sync.syncing ? "Checking mail" : "Loading";
   }
 
   let emptyHtml = "";
-  if (!showLoading && !state.threads.length) {
+  if (!showLoading && !visibleThreads.length) {
     if (state.listError) {
       emptyHtml = `<div>${esc(state.listError)}</div><button class="btn" data-action="retry-list">Retry</button>`;
     } else if (!state.accounts.length) {
@@ -4660,6 +4667,24 @@ function schedulePoll(delay = 5000) {
   }, delay);
 }
 
+function withPinnedUnreadThread(threads) {
+  if (!state.unreadOnly || !state.selectedKey) return threads;
+  if (state.searchMode || state.query) return threads;
+  if (threads.some((thread) => thread.key === state.selectedKey)) {
+    return threads;
+  }
+  const selected = state.selected && state.selected.thread;
+  if (!selected) return threads;
+  if (
+    threadKey(selected.account_id, selected.id) !== state.selectedKey
+  ) {
+    return threads;
+  }
+  return [...threads, selected].sort(
+    (a, b) => Number(b.last_date || 0) - Number(a.last_date || 0)
+  );
+}
+
 async function loadThreads(options = {}) {
   const seq = ++state.listSeq;
   state.listLoading = true;
@@ -4681,7 +4706,7 @@ async function loadThreads(options = {}) {
     params.set("limit", String(state.listLimit));
     const data = await api(`/api/threads?${params.toString()}`);
     if (seq !== state.listSeq) return;
-    state.threads = data.threads || [];
+    state.threads = withPinnedUnreadThread(data.threads || []);
     state.localHasMore = Boolean(data.has_more);
     state.viewTotal =
       state.viewId && data.view_total != null
@@ -6135,6 +6160,7 @@ async function handleAction(element, event) {
       clearSelection();
       renderReader();
       renderList();
+      if (state.unreadOnly) loadThreads({ quiet: true });
       updateReaderPane();
       return;
     case "toggle-unread":

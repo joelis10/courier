@@ -245,6 +245,8 @@ Notification settings include:
 - Account badges disappear while a single account is selected; labels stay on the cards.
   Label chips use the same before/after sender or subject placement as account badges,
   and the account badge comes first when both share a position.
+- The **Unread** filter keeps the thread you open visible and selected even after it
+  becomes read. It leaves the list when you return to the list or open another thread.
 - Right-click a thread for **Summarize all**, **Summarize unread** when unread mail exists,
   **Mark as read/unread**, **Mark as spam**, **Archive**, and **Delete**. Delete moves the
   thread to Gmail's Trash. Marking the open thread unread closes the reader. Summaries open
