@@ -34,7 +34,8 @@ Chromium, no Electron, no Node runtime, and no calendar.
 - Keeps running in the tray, checks for new mail on a 10-second, 1-minute, or manual
   schedule, and sends desktop notifications with an optional one-line AI summary.
 - Checks GitHub for new Courier releases manually or automatically every 1, 5, or 8 hours;
-  automatic checks are off by default.
+  automatic checks are off by default. Installed packages can download and apply a newer
+  release from Settings → Updates, then restart Courier when prompted.
 - Resizes inline images with corner handles or the image menu, which can also move an image
   out of the body and into the attachment list, or delete it.
 - Has five client themes, five email content themes, resizable panes, split/reading/full
@@ -76,8 +77,14 @@ courier
 
 The package is architecture-independent. It installs the application, desktop launcher,
 icon, and manual page, and pulls in Python 3, PyGObject, GTK 3, WebKitGTK 4.1, and
-libnotify. Release packages are built from source by the
+libnotify. Polkit and xdg-utils are recommended so the in-client updater can run the
+package installer. Release packages are built from source by the
 [Debian package workflow](.github/workflows/debian.yml).
+
+After installing the package, later releases can be downloaded and applied from
+**Settings → Updates**. Courier verifies the release checksum, asks for system
+authorisation, and offers to restart when the package is installed. A source checkout is
+never replaced by this flow.
 
 To remove the app while keeping your mail database:
 

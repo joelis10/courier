@@ -591,6 +591,130 @@ function baseCss(theme) {
 `;
 }
 
+let colorProbe = null;
+
+function cssColorChannels(value) {
+  let text = String(value || "").trim().toLowerCase();
+  if (!text) return null;
+  text = text.replace(/\s*!important\s*$/, "").trim();
+  if (
+    !text ||
+    text === "inherit" ||
+    text === "currentcolor" ||
+    text === "transparent"
+  ) {
+    return null;
+  }
+  if (text === "windowtext" || text === "auto") {
+    return [0, 0, 0, 1];
+  }
+  try {
+    if (!colorProbe && typeof document !== "undefined") {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      colorProbe = canvas.getContext("2d");
+    }
+    if (colorProbe) {
+      colorProbe.fillStyle = "#ffffff";
+      colorProbe.fillStyle = text;
+      const normalized = String(colorProbe.fillStyle || "");
+      if (normalized.startsWith("#")) {
+        const hex = normalized.slice(1);
+        if (hex.length === 6) {
+          return [
+            parseInt(hex.slice(0, 2), 16),
+            parseInt(hex.slice(2, 4), 16),
+            parseInt(hex.slice(4, 6), 16),
+            1,
+          ];
+        }
+        if (hex.length === 3) {
+          return [
+            parseInt(hex[0] + hex[0], 16),
+            parseInt(hex[1] + hex[1], 16),
+            parseInt(hex[2] + hex[2], 16),
+            1,
+          ];
+        }
+      }
+      const rgb = normalized.match(/^rgba?\(([^)]+)\)$/);
+      if (rgb) {
+        const parts = rgb[1]
+          .split(/[,\s/]+/)
+          .filter(Boolean)
+          .map(Number);
+        if (parts.length >= 3 && parts.slice(0, 3).every(Number.isFinite)) {
+          return [
+            parts[0],
+            parts[1],
+            parts[2],
+            parts.length > 3 && Number.isFinite(parts[3]) ? parts[3] : 1,
+          ];
+        }
+      }
+    }
+  } catch (error) {
+    /* Treat unknown colours as safe. */
+  }
+  return null;
+}
+
+function isDarkCssColor(value) {
+  const channels = cssColorChannels(value);
+  if (!channels) return false;
+  const [red, green, blue, alpha] = channels;
+  if (alpha !== undefined && alpha < 0.15) return false;
+  return Math.max(red, green, blue) / 255 < 0.6;
+}
+
+function hasExplicitBackground(element, root) {
+  let node = element;
+  while (node && node.nodeType === 1) {
+    if (node.hasAttribute("bgcolor")) return true;
+    const style = node.style;
+    if (
+      style &&
+      (style.backgroundColor || style.backgroundImage || style.background)
+    ) {
+      return true;
+    }
+    if (node === root) break;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+function neutralizeDarkText(html) {
+  const doc = makeDocument(html);
+  for (const element of doc.body.querySelectorAll("[style]")) {
+    const color = element.style.color;
+    if (
+      color &&
+      isDarkCssColor(color) &&
+      !hasExplicitBackground(element, doc.body)
+    ) {
+      element.style.removeProperty("color");
+    }
+  }
+  for (const font of doc.body.querySelectorAll("font[color]")) {
+    if (
+      isDarkCssColor(font.getAttribute("color")) &&
+      !hasExplicitBackground(font, doc.body)
+    ) {
+      font.removeAttribute("color");
+    }
+  }
+  for (const style of doc.body.querySelectorAll("style")) {
+    style.textContent = style.textContent.replace(
+      /(^|[;{])(\s*)color\s*:\s*([^;}]+)(;?)/gi,
+      (match, lead, _space, value) =>
+        isDarkCssColor(value) ? lead : match
+    );
+  }
+  return doc.body.innerHTML;
+}
+
 function emailDocument(fragment, allowImages, theme = EMAIL_THEMES.paper) {
   const remote = allowImages ? "https: http:" : "";
   const csp = [
@@ -1116,6 +1240,10 @@ export function renderEmailBody(container, message, options = {}) {
     const mainTheme = result.mainPlain ? selectedTheme : "fog";
     applyPaperTheme(container, mainTheme);
     applyPaperTheme(bodyShell, mainTheme);
+    const mainHtml =
+      EMAIL_THEMES[mainTheme].scheme === "dark"
+        ? neutralizeDarkText(result.main)
+        : result.main;
     const imageUrls = collectImageUrls(
       [result.main, result.signature].filter(Boolean).join("")
     );
@@ -1146,7 +1274,7 @@ export function renderEmailBody(container, message, options = {}) {
     bodyShell.appendChild(content);
 
     const main = createFrame(
-      result.main,
+      mainHtml,
       allowImages,
       "Message content",
       imageUrls,
@@ -1195,10 +1323,14 @@ export function renderEmailBody(container, message, options = {}) {
             const foldTheme = isPlainFragment(fold.html)
               ? mainTheme
               : "fog";
+            const foldHtml =
+              EMAIL_THEMES[foldTheme].scheme === "dark"
+                ? neutralizeDarkText(fold.html)
+                : fold.html;
             appendFrame(
               foldContent,
               createFrame(
-                fold.html,
+                foldHtml,
                 allowImages,
                 fold.kind === "signature" ? "Signature" : "Quoted text",
                 imageUrls,

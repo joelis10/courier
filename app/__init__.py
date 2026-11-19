@@ -1,3 +1,3 @@
 """Courier package."""
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"

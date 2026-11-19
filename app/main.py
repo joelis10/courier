@@ -175,7 +175,11 @@ X-GNOME-Autostart-enabled=true
         pass
 
 
-def run_gui(app: App, minimized: bool = False) -> int:
+def run_gui(
+    app: App,
+    minimized: bool = False,
+    restart_args: list[str] | None = None,
+) -> int:
     warnings.filterwarnings(
         "ignore", category=DeprecationWarning, message=".*Gtk\\.StatusIcon.*"
     )
@@ -723,6 +727,7 @@ def run_gui(app: App, minimized: bool = False) -> int:
     webview.load_uri(url)
 
     quitting = False
+    restart_requested = False
     tray_icon = None
     tray_menu = None
     tray_available = False
@@ -957,6 +962,21 @@ def run_gui(app: App, minimized: bool = False) -> int:
         finally:
             Gtk.main_quit()
 
+    def request_restart() -> None:
+        def apply_restart() -> bool:
+            nonlocal restart_requested
+            if quitting or restart_requested:
+                return False
+            restart_requested = True
+            quit_app()
+            return False
+
+        # Let the restart request finish writing its response before the server
+        # and window shut down.
+        GLib.timeout_add(300, apply_restart)
+
+    app.restart_courier = request_restart
+
     try:
         tray_icon = Gtk.StatusIcon()
         loaded = False
@@ -1078,6 +1098,15 @@ def run_gui(app: App, minimized: bool = False) -> int:
 
     GLib.timeout_add(80, place_on_right)
     Gtk.main()
+    if restart_requested:
+        app.log("restarting Courier after update")
+        try:
+            os.execv(
+                sys.executable,
+                [sys.executable, "-m", "app.main", *(restart_args or [])],
+            )
+        except Exception as exc:
+            app.log(f"restart failed: {exc!r}")
     return 0
 
 
@@ -1102,7 +1131,11 @@ def main() -> int:
     try:
         if args.serve:
             return run_headless(app)
-        return run_gui(app, minimized=args.minimized)
+        return run_gui(
+            app,
+            minimized=args.minimized,
+            restart_args=sys.argv[1:],
+        )
     except Exception as exc:
         app.log(f"fatal: {exc!r}")
         print(f"Courier could not start: {exc}", file=sys.stderr)

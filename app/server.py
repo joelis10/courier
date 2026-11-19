@@ -15,9 +15,7 @@ import re
 import secrets
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +26,14 @@ from .ai import AIClient, AIError, message_messages, thread_messages
 from .gmail import AuthError, GmailClient, GmailError, parse_message
 from .store import FOLDERS, Store
 from .sync import SyncManager
+from .updater import (
+    UpdateError,
+    UpdateManager,
+    fetch_latest_release,
+    release_asset,
+    release_version,
+    version_key as _version_key,
+)
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 TOKEN_HEADER = "X-Courier-Token"
@@ -39,10 +45,6 @@ def _outgoing_name(account) -> str:
     name = str(account["name"] or "").strip()
     return name or local
 
-
-def _version_key(value: str) -> tuple[int, ...]:
-    parts = re.findall(r"\d+", str(value or ""))
-    return tuple(int(part) for part in parts[:4]) or (0,)
 
 UI_THEMES = {"fog", "linen", "sepia", "graphite", "midnight"}
 UI_EMAIL_THEMES = {"fog", "linen", "sepia", "graphite", "midnight"}
@@ -264,6 +266,8 @@ class App:
         self.choose_oauth_json = None
         self.choose_inline_image = None
         self.notify_update = None
+        self.restart_courier = None
+        self.updates = UpdateManager(self)
 
     # ------------------------------------------------------------------ util
 
@@ -563,6 +567,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if url.path == "/api/update/check":
                     self._check_updates()
                     return
+                if url.path == "/api/update/apply":
+                    try:
+                        self.app.updates.apply()
+                    except UpdateError as exc:
+                        raise ApiError(exc.message, exc.status) from exc
+                    self._send_json(self.app.updates.status())
+                    return
+                if url.path == "/api/update/restart":
+                    self._restart_courier()
+                    return
                 if url.path == "/api/threads/older":
                     result = self.app.sync.fetch_older(
                         folder=str(payload.get("folder") or "inbox"),
@@ -623,6 +637,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/settings":
             self._send_json(self.app.public_settings())
+            return
+        if path == "/api/update/status":
+            self._send_json(self.app.updates.status())
             return
         if path == "/api/contacts":
             contacts = self.app.store.contact_suggestions(
@@ -1247,41 +1264,26 @@ class ApiHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------ search
 
     def _check_updates(self) -> None:
-        url = (
-            "https://api.github.com/repos/joelis10/courier/"
-            "releases/latest"
-        )
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": f"Courier/{APP_VERSION}",
-                "Accept": "application/vnd.github+json",
-            },
-        )
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise ApiError("No published Courier release was found.", 404)
-            if exc.code == 403:
-                raise ApiError(
-                    "GitHub update checks are rate limited. Try again later.",
-                    429,
-                )
-            raise ApiError(
-                f"GitHub returned {exc.code} while checking for updates.",
-                502,
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise ApiError(
-                "Could not reach GitHub to check for updates.", 502
-            ) from exc
+            data = fetch_latest_release()
+            latest = release_version(data)
+        except UpdateError as exc:
+            raise ApiError(exc.message, exc.status) from exc
         tag = str(data.get("tag_name") or "").strip()
-        latest = tag.lstrip("vV")
-        if not latest:
-            raise ApiError("GitHub returned an invalid release.", 502)
         newer = _version_key(latest) > _version_key(APP_VERSION)
+        asset = None
+        asset_error = ""
+        if newer:
+            try:
+                found = release_asset(data, latest)
+            except UpdateError as exc:
+                asset_error = exc.message
+            else:
+                asset = {
+                    "name": found["name"],
+                    "size": found["size"],
+                    "sha256": found["sha256"],
+                }
         notified_version = (
             self.app.store.get_setting("update_notified_version") or ""
         )
@@ -1307,6 +1309,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "url": str(data.get("html_url") or ""),
                 "published_at": str(data.get("published_at") or ""),
                 "newer": newer,
+                "asset": asset,
+                "asset_error": asset_error,
+                "mode": self.app.updates.mode(),
+                "operation": self.app.updates.operation(),
+                "installed_version": self.app.updates.installed_version(),
                 "notification_sent": notification_sent,
                 "notified_version": notified_version,
                 "checked_at": time.strftime(
@@ -1314,6 +1321,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ),
             }
         )
+
+    def _restart_courier(self) -> None:
+        restart = getattr(self.app, "restart_courier", None)
+        if not callable(restart):
+            raise ApiError(
+                "Restart Courier from the desktop session to load the update.",
+                409,
+            )
+        self._send_json({"restarting": True})
+        try:
+            restart()
+        except Exception as exc:
+            self.app.log(f"restart failed: {exc!r}")
 
     def _search(self, payload: dict[str, Any]) -> None:
         query = str(payload.get("q") or "").strip()

@@ -69,6 +69,7 @@ app/
   gmail.py       OAuth helpers, Gmail REST client, MIME parser/builder
   sync.py        full/incremental sync, history paging, labels, older page tokens
   ai.py          OpenAI-compatible streaming summaries, prompt building, key isolation
+  updater.py     release asset download, SHA-256 verification, package install
   notifications.py desktop notifications, sounds, AI notification summaries
   theme.py       account colour palette
   web/
@@ -260,10 +261,25 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   search, or Compose is used. The header is full width and has no back button. The Updates
   section compares `APP_VERSION` with GitHub's latest release. Automatic checks are off by
   default; when enabled they run after 15 seconds and then at 1, 5, or 8 hour intervals.
-  `POST /api/update/check` returns the latest tag, URL, and whether it is newer. A newer
+  `POST /api/update/check` returns the latest tag, URL, whether it is newer, the
+  checksummed `.deb` asset, and the install mode. A newer
   version sends one desktop notification per version with the version in the title; clicking
   it opens Settings and scrolls to Updates. Manual status lives in `#update-status`;
   automatic checks only toast once per version when no desktop notification was sent.
+- In-client updates only run for the packaged app at `/usr/lib/courier`; a source checkout
+  shows the checkout reason and never replaces itself. `app/updater.py` asks the GitHub
+  release API for the asset, requires a `sha256:` digest, streams the `.deb` into
+  `data_dir/updates` (0700 directory, 0600 file), and rechecks the digest before install.
+  The browser never supplies a URL. Installation uses `pkexec` plus
+  `apt-get install -y --no-install-recommends` with noninteractive configuration handling,
+  or `xdg-open` as a desktop-installer fallback. Installer tools are resolved from fixed
+  `/usr/bin` paths, never `PATH`, and commands run without a shell. The operation is
+  asynchronous and exposed through `GET /api/update/status`; `POST /api/update/apply`
+  starts it.
+  `update_installed_version` keeps the restart offer after Settings is closed. The
+  **Restart Courier** button calls `POST /api/update/restart`, which re-execs
+  `python3 -m app.main` with the original arguments after `App.stop()` releases the
+  single-instance socket.
 - Accounts own their labels in the sidebar. Each account row has a disclosure control;
   labels are nested beneath it, five at a time with Show more. All accounts is expandable
   too and shows merged labels. Selecting an account where the current label does not exist
@@ -322,7 +338,11 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   `table`, `style`, `link`, `video`, `svg`, `canvas`, `iframe`, `object`, `embed`,
   `picture`, and `hr`; debug copies include whole-message and main-fragment tags.
   `body.js` owns the palette, applies CSS variables to the message host and inner paper,
-  and passes the resolved palette into each sanitised iframe.
+  and passes the resolved palette into each sanitised iframe. On dark content themes, plain
+  frames remove very dark inline text colours and dark `color` declarations in body style
+  blocks so text such as Outlook's `color: rgb(0, 0, 0)` inherits the theme ink. Bright
+  colours and links are preserved, and elements with an explicit background keep their own
+  text colour so white cards remain readable.
 - The message mount is `.message-body-host`; only the inner `.message-body` carries the
   paper border, padding, and shadow. Do not put the class on both, which produced a
   double frame.
@@ -486,7 +506,9 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   HTML/text of every message, selected/resolved main theme, plain-text classification for
   the whole message and the main fragment, per-fragment signature/quote themes, and
   signature/quote detection previews. Keep this diagnostic action when changing body
-  rendering; it is how users report missed signatures and theme problems.
+  rendering; it is how users report missed signatures and theme problems. Right-clicking a
+  message header offers **Copy email debug content**, which uses the same payload shape with
+  `scope: "message"` and only that message, so one email can be shared without the thread.
 - Opening a thread keeps its toolbar, subject, account badge, and message count visible
   while a spinner occupies only the thread body area. The body stays `visibility: hidden`
   until every rendered message frame has loaded, measured, and settled its images; then
@@ -642,14 +664,15 @@ CI runs the same tests and JavaScript syntax checks before building the package.
 Debian workflow uses the standard Ubuntu 24.04 GitHub-hosted runner, which is free for
 public repositories. Pushing a `v*` tag attaches the built `.deb` to a GitHub Release.
 
-The 42 tests cover thread metadata extraction, plain-text fallback, inline/attachment
+The 49 tests cover thread metadata extraction, plain-text fallback, inline/attachment
 parsing, MIME construction, folder counting/archive/drafts semantics, thread label updates,
 account metadata, refresh intervals, user-label merging and label paging, folder paging,
 older-page fetching with Gmail page tokens, notification default actions, archived-mail
 filtering, self-sent filtering, outgoing-name and ID-token fallbacks, AI signature/quote
 cleaning, AI and Google-setup preference defaults, AI notification gating, contact name
-resolution, custom view filtering/default clearing, and a full sync plus lazy thread load
-using a fake Gmail client. UI smoke tests
+resolution, custom view filtering/default clearing, release asset version matching and
+checksum selection, download digest verification, installer command construction, and a
+full sync plus lazy thread load using a fake Gmail client. UI smoke tests
 cover custom account names/colours, the four badge and label positions, wide/full reader
 widths, header clicks, entity decoding, summary scope and scroll containment, labels/Show
 more, custom view creation/filtering/default view, draft filtering/no empty reply drafts,

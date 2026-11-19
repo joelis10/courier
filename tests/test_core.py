@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import copy
 import email
+import hashlib
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.ai import _strip_thinking, clean_email_body
 from app.notifications import NotificationMonitor
@@ -20,6 +23,14 @@ from app.gmail import (
 )
 from app.store import Store
 from app.sync import SyncManager
+from app.updater import (
+    UpdateError,
+    asset_matches_version,
+    download_package,
+    installer_command,
+    release_asset,
+    version_key,
+)
 
 
 def b64(data: str | bytes) -> str:
@@ -1024,6 +1035,132 @@ class UIPrefsTests(unittest.TestCase):
         )
         self.assertTrue(prefs["aiEnabled"])
         self.assertTrue(prefs["googleSetupSeen"])
+
+
+class UpdateTests(unittest.TestCase):
+    class FakeDownload:
+        def __init__(self, payload):
+            self.payload = io.BytesIO(payload)
+            self.headers = {"Content-Length": str(len(payload))}
+
+        def read(self, size=-1):
+            return self.payload.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def download_asset(self, payload, digest=None):
+        return {
+            "name": "courier_1.2.1-1_all.deb",
+            "size": len(payload),
+            "sha256": digest or hashlib.sha256(payload).hexdigest(),
+            "url": (
+                "https://github.com/joelis10/courier/releases/download/"
+                "v1.2.1/courier_1.2.1-1_all.deb"
+            ),
+        }
+
+    def release(self, *, digest=True):
+        asset = {
+            "name": "courier_1.2.1-1_all.deb",
+            "size": 900_000,
+            "browser_download_url": (
+                "https://github.com/joelis10/courier/releases/download/"
+                "v1.2.1/courier_1.2.1-1_all.deb"
+            ),
+        }
+        if digest:
+            asset["digest"] = "sha256:" + "a" * 64
+        return {"tag_name": "v1.2.1", "assets": [asset]}
+
+    def test_release_asset_requires_a_checksummed_debian_package(self):
+        asset = release_asset(self.release())
+        self.assertEqual(asset["name"], "courier_1.2.1-1_all.deb")
+        self.assertEqual(asset["sha256"], "a" * 64)
+        with self.assertRaises(UpdateError):
+            release_asset(self.release(digest=False))
+
+    def test_asset_name_matches_the_exact_release_version(self):
+        self.assertTrue(
+            asset_matches_version("courier_1.2.1-1_all.deb", "1.2.1")
+        )
+        self.assertTrue(
+            asset_matches_version("courier_1.2.1_all.deb", "1.2.1")
+        )
+        self.assertFalse(
+            asset_matches_version("courier_1.2.10-1_all.deb", "1.2.1")
+        )
+
+    def test_version_key_compares_release_versions(self):
+        self.assertGreater(version_key("1.2.1"), version_key("1.2.0"))
+        self.assertGreater(version_key("1.2.0-2"), version_key("1.2.0-1"))
+        self.assertEqual(version_key("v1.2.1"), (1, 2, 1))
+
+    def test_download_package_verifies_the_published_digest(self):
+        payload = b"fake debian package bytes"
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "courier.deb"
+            with mock.patch(
+                "app.updater.urllib.request.urlopen",
+                return_value=self.FakeDownload(payload),
+            ):
+                result = download_package(
+                    self.download_asset(payload), destination
+                )
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(result["size"], len(payload))
+            self.assertEqual(
+                result["sha256"], hashlib.sha256(payload).hexdigest()
+            )
+
+    def test_download_package_rejects_a_mismatched_digest(self):
+        payload = b"fake debian package bytes"
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "courier.deb"
+            with mock.patch(
+                "app.updater.urllib.request.urlopen",
+                return_value=self.FakeDownload(payload),
+            ):
+                with self.assertRaises(UpdateError):
+                    download_package(
+                        self.download_asset(payload, "0" * 64), destination
+                    )
+            self.assertFalse(destination.exists())
+            self.assertFalse(destination.with_name("courier.deb.part").exists())
+
+    def test_installer_command_uses_pkexec_without_a_shell(self):
+        package = Path("/home/joel/.local/share/courier/updates/courier.deb")
+        tools = {
+            "apt-get": "/usr/bin/apt-get",
+            "pkexec": "/usr/bin/pkexec",
+            "env": "/usr/bin/env",
+        }
+        command, method = installer_command(
+            package, which=tools.get, euid=1000
+        )
+        self.assertEqual(method, "pkexec")
+        self.assertEqual(command[:5], [
+            "/usr/bin/pkexec",
+            "/usr/bin/env",
+            "DEBIAN_FRONTEND=noninteractive",
+            "APT_LISTCHANGES_FRONTEND=none",
+            "/usr/bin/apt-get",
+        ])
+        self.assertEqual(command[-1], str(package))
+        self.assertIn("--no-install-recommends", command)
+
+    def test_installer_command_falls_back_to_the_desktop_installer(self):
+        package = Path("/home/joel/courier.deb")
+        command, method = installer_command(
+            package,
+            which={"xdg-open": "/usr/bin/xdg-open"}.get,
+            euid=1000,
+        )
+        self.assertEqual(method, "installer")
+        self.assertEqual(command, ["/usr/bin/xdg-open", str(package)])
 
 
 class OutgoingNameTests(unittest.TestCase):

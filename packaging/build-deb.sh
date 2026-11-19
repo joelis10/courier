@@ -58,7 +58,7 @@ Architecture: all
 Installed-Size: $SIZE
 Maintainer: Joel Nod <joelis10@users.noreply.github.com>
 Depends: python3 (>= 3.11), python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-notify-0.7
-Recommends: ffmpeg
+Recommends: ffmpeg, pkexec | policykit-1, xdg-utils
 Homepage: https://github.com/joelis10/courier
 Description: local Gmail client for Linux
  Courier is a desktop Gmail client built with Python, GTK 3, and

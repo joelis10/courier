@@ -250,7 +250,7 @@ class NotificationMonitor:
         except Exception:
             prefs = {}
         title = f"Courier {version} is available"
-        body = f"Open Settings → Updates to download Courier {version}."
+        body = f"Open Settings → Updates to download and install Courier {version}."
 
         def send() -> bool:
             self._send_notification(title, body, prefs, ("__update__", version))

@@ -162,7 +162,11 @@ const state = {
   version: "",
   updateChecking: false,
   updateResult: null,
+  updateMode: null,
+  updateOperation: null,
   updateTimer: null,
+  updatePollTimer: null,
+  updatePollErrors: 0,
   updateSessionChecked: false,
   updateNotifiedVersion: "",
   oauthPending: false,
@@ -4221,23 +4225,166 @@ function aiStatusHtml() {
   return `<span class="settings-status" id="ai-status" aria-live="polite"></span>`;
 }
 
+function updateLatestVersion() {
+  const result = state.updateResult;
+  return String(result && result.latest ? result.latest : "").replace(/^v/i, "");
+}
+
+function updateOperationBusy(operation = state.updateOperation) {
+  return Boolean(
+    operation &&
+      (operation.status === "downloading" || operation.status === "installing")
+  );
+}
+
+function updateOperationVersion(operation = state.updateOperation) {
+  return String(
+    (operation && operation.version) || updateLatestVersion() || ""
+  ).replace(/^v/i, "");
+}
+
+function updateProgressText(operation) {
+  const total = Number(operation && operation.total) || 0;
+  const received = Number(operation && operation.received) || 0;
+  if (!total || received <= 0) return "";
+  const percent = Math.max(
+    0,
+    Math.min(100, Math.floor((received / total) * 100))
+  );
+  return ` ${percent}%`;
+}
+
+function updateStatusIsError() {
+  const operation = state.updateOperation;
+  return Boolean(
+    (state.updateResult && state.updateResult.error) ||
+      (operation && operation.status === "failed")
+  );
+}
+
 function updateStatusContent() {
   if (state.updateChecking) return "Checking GitHub…";
   const result = state.updateResult;
+  const operation = state.updateOperation;
+  const version = updateOperationVersion(operation);
+  if (operation && operation.status === "downloading") {
+    return `Downloading Courier ${esc(version)}…${updateProgressText(
+      operation
+    )}`;
+  }
+  if (operation && operation.status === "installing") {
+    return `Installing Courier ${esc(
+      version
+    )}. Enter your password if prompted.`;
+  }
+  if (operation && operation.status === "installed") {
+    return `Courier ${esc(version)} is installed. Restart Courier to finish.`;
+  }
+  if (operation && operation.status === "opened") {
+    return "The package installer is open. Restart Courier after it finishes.";
+  }
+  if (operation && operation.status === "restarting") {
+    return "Restarting Courier…";
+  }
+  if (operation && operation.status === "failed") {
+    return esc(operation.message || "The update could not be installed.");
+  }
   if (!result) return "Not checked yet.";
   if (result.error) return esc(result.error);
-  const latest = String(result.latest || "").replace(/^v/i, "");
+  const latest = updateLatestVersion();
   if (result.newer) {
     const link = result.url
       ? ` <button type="button" class="link-btn" data-action="update-open">View release</button>`
       : "";
+    if (result.asset_error) {
+      return `Courier ${esc(latest)} is available. ${esc(
+        result.asset_error
+      )}${link}`;
+    }
+    const installed = String(result.installed_version || "").replace(
+      /^v/i,
+      ""
+    );
+    if (installed && installed === latest) {
+      return `Courier ${esc(latest)} is installed. Restart Courier to finish.${link}`;
+    }
     return `Courier ${esc(latest)} is available.${link}`;
   }
   return `Courier is up to date${latest ? ` (${esc(latest)})` : ""}.`;
 }
 
+function updateModeDetails() {
+  return (
+    state.updateMode ||
+    (state.updateResult && state.updateResult.mode) ||
+    null
+  );
+}
+
+function refreshUpdateActions() {
+  const row = $("#update-action-row");
+  if (!row) return;
+  const result = state.updateResult;
+  const operation = state.updateOperation;
+  const mode = updateModeDetails();
+  const latest = updateLatestVersion();
+  const installed = String(
+    (result && result.installed_version) || ""
+  ).replace(/^v/i, "");
+  const canRestart = Boolean(mode && mode.can_restart);
+  const finished =
+    Boolean(operation && operation.status === "installed") ||
+    Boolean(operation && operation.status === "opened") ||
+    Boolean(latest && installed === latest);
+  let html = "";
+  if (operation && operation.status === "downloading") {
+    html = '<button class="btn" disabled>Downloading…</button>';
+  } else if (operation && operation.status === "installing") {
+    html = '<button class="btn" disabled>Installing…</button>';
+  } else if (operation && operation.status === "restarting") {
+    html = '<button class="btn" disabled>Restarting…</button>';
+  } else if (finished) {
+    if (canRestart) {
+      html =
+        '<button class="btn accent" data-action="update-restart">Restart Courier</button>';
+    }
+  } else if (
+    result &&
+    result.newer &&
+    result.asset &&
+    mode &&
+    mode.can_install
+  ) {
+    const label =
+      operation && operation.status === "failed"
+        ? "Try again"
+        : "Download and install";
+    html = `<button class="btn accent" data-action="update-apply">${label}</button>`;
+  }
+  row.innerHTML = html;
+  row.hidden = !html;
+}
+
+function refreshUpdateNote() {
+  const note = $("#update-mode-note");
+  if (!note) return;
+  const mode = updateModeDetails();
+  const operation = state.updateOperation;
+  let text = (mode && mode.reason) || "";
+  if (
+    mode &&
+    !mode.can_restart &&
+    operation &&
+    (operation.status === "installed" || operation.status === "opened")
+  ) {
+    text = "Quit Courier and start it again to load the update.";
+  }
+  note.textContent = text;
+  note.hidden = !text;
+}
+
 function updateStatusHtml() {
-  const error = Boolean(state.updateResult && state.updateResult.error);
+  const error = updateStatusIsError();
   return `<span class="settings-status ${
     error ? "error" : ""
   }" id="update-status" aria-live="polite">${updateStatusContent()}</span>`;
@@ -4246,21 +4393,143 @@ function updateStatusHtml() {
 function refreshUpdateStatus() {
   const host = $("#update-status");
   if (host) {
-    const error = Boolean(state.updateResult && state.updateResult.error);
-    host.classList.toggle("error", error);
+    host.classList.toggle("error", updateStatusIsError());
     host.innerHTML = updateStatusContent();
   }
   const button = $("#update-check-btn");
   if (button) {
-    button.disabled = state.updateChecking;
+    const busy = updateOperationBusy();
+    button.disabled = state.updateChecking || busy;
     button.textContent = state.updateChecking
       ? "Checking…"
-      : "Check GitHub for updates";
+      : busy
+        ? "Update in progress"
+        : "Check GitHub for updates";
+  }
+  refreshUpdateActions();
+  refreshUpdateNote();
+}
+
+async function loadUpdateOperation(options = {}) {
+  let data = null;
+  try {
+    data = await api("/api/update/status", { timeout: 15000 });
+  } catch (error) {
+    state.updatePollErrors += 1;
+    if (!options.quiet) {
+      toast(error.message || "Could not read update status.", true);
+    }
+    return null;
+  }
+  state.updatePollErrors = 0;
+  const wasBusy = updateOperationBusy();
+  state.updateMode = data.mode || state.updateMode;
+  state.updateOperation = data.operation || null;
+  if (state.updateResult && data.installed_version !== undefined) {
+    state.updateResult.installed_version = data.installed_version;
+  }
+  refreshUpdateStatus();
+  const operation = state.updateOperation;
+  if (wasBusy && operation) {
+    if (operation.status === "installed") {
+      toast(
+        `Courier ${updateOperationVersion(
+          operation
+        )} is installed. Restart Courier to finish.`,
+        false,
+        8000
+      );
+    } else if (operation.status === "opened") {
+      toast(
+        "Package installer opened. Restart Courier when it finishes.",
+        false,
+        8000
+      );
+    } else if (operation.status === "failed") {
+      toast(operation.message || "The update could not be installed.", true);
+    }
+  }
+  return data;
+}
+
+function scheduleUpdatePoll() {
+  if (state.updatePollTimer) return;
+  if (!updateOperationBusy()) return;
+  state.updatePollTimer = setTimeout(async () => {
+    state.updatePollTimer = null;
+    const data = await loadUpdateOperation({ quiet: true });
+    if (!data && state.updatePollErrors >= 5) {
+      state.updateOperation = {
+        ...(state.updateOperation || {}),
+        status: "failed",
+        message: "Could not read update status. See courier.log.",
+      };
+      refreshUpdateStatus();
+      return;
+    }
+    scheduleUpdatePoll();
+  }, 900);
+}
+
+async function applyUpdate() {
+  if (updateOperationBusy()) return;
+  const latest = updateLatestVersion();
+  state.updateOperation = {
+    status: "downloading",
+    version: latest,
+    received: 0,
+    total: 0,
+    message: "",
+  };
+  refreshUpdateStatus();
+  try {
+    const data = await api("/api/update/apply", {
+      method: "POST",
+      body: {},
+      timeout: 30000,
+    });
+    state.updateMode = data.mode || state.updateMode;
+    state.updateOperation = data.operation || null;
+    if (state.updateResult && data.installed_version !== undefined) {
+      state.updateResult.installed_version = data.installed_version;
+    }
+    refreshUpdateStatus();
+    scheduleUpdatePoll();
+  } catch (error) {
+    state.updateOperation = {
+      status: "failed",
+      version: latest,
+      message: error.message || "Could not start the update.",
+    };
+    refreshUpdateStatus();
+    toast(state.updateOperation.message, true);
+  }
+}
+
+async function restartCourier() {
+  state.updateOperation = {
+    ...(state.updateOperation || {}),
+    status: "restarting",
+  };
+  refreshUpdateStatus();
+  try {
+    await api("/api/update/restart", {
+      method: "POST",
+      body: {},
+      timeout: 8000,
+    });
+  } catch (error) {
+    state.updateOperation = {
+      ...(state.updateOperation || {}),
+      status: "installed",
+    };
+    refreshUpdateStatus();
+    toast(error.message || "Could not restart Courier.", true);
   }
 }
 
 async function checkForUpdates(options = {}) {
-  if (state.updateChecking) return null;
+  if (state.updateChecking || updateOperationBusy()) return null;
   state.updateChecking = true;
   refreshUpdateStatus();
   let data = null;
@@ -4271,6 +4540,8 @@ async function checkForUpdates(options = {}) {
       timeout: 30000,
     });
     state.updateResult = data;
+    state.updateMode = data.mode || state.updateMode;
+    state.updateOperation = data.operation || state.updateOperation;
     const latest = String(data.latest || "").replace(/^v/i, "");
     if (data.newer) {
       const alreadyNotified = data.notified_version === latest;
@@ -4297,12 +4568,14 @@ async function checkForUpdates(options = {}) {
     state.updateChecking = false;
     refreshUpdateStatus();
   }
+  if (updateOperationBusy()) scheduleUpdatePoll();
   if (!options.quiet && state.prefs.updateAuto) {
     state.updateSessionChecked = true;
     scheduleUpdateCheck();
   }
   return data;
 }
+
 
 function scheduleUpdateCheck() {
   if (state.updateTimer) {
@@ -5019,9 +5292,11 @@ function renderSettings() {
           }>${state.updateChecking ? "Checking…" : "Check GitHub for updates"}</button>
           ${updateStatusHtml()}
         </div>
+        <div class="settings-actions" id="update-action-row" hidden></div>
+        <p class="settings-note" id="update-mode-note" hidden></p>
         <p class="settings-note">${
           state.version ? `Courier ${esc(state.version)}. ` : ""
-        }Updates are checked against github.com/joelis10/courier.</p>
+        }Updates are checked against github.com/joelis10/courier. Installed packages can download and install a new release here; source checkouts are never changed.</p>
       </div>
     </section>
 
@@ -5196,6 +5471,7 @@ function renderSettings() {
     </section>
   </div>`;
   updateNotificationSoundUi();
+  refreshUpdateStatus();
   pane.scrollTop = scroll;
   if (state.settingsFocus) {
     const target = $(`[data-section="${state.settingsFocus}"]`, pane);
@@ -5264,6 +5540,7 @@ function openSettings(focus = null) {
       state.settingsFocus = focus;
       renderSettings();
     }
+    if (focus === "updates") refreshUpdateOperation();
     return;
   }
   if (state.composer) captureComposerFields();
@@ -5275,6 +5552,12 @@ function openSettings(focus = null) {
   renderSettings();
   updateReaderPane();
   renderSidebar();
+  if (focus === "updates") refreshUpdateOperation();
+}
+
+async function refreshUpdateOperation() {
+  await loadUpdateOperation({ quiet: true });
+  scheduleUpdatePoll();
 }
 
 function closeSettings() {
@@ -6290,9 +6573,48 @@ async function copyThreadDebug() {
   const thread = currentThread();
   const messages = currentMessages();
   if (!thread) return;
-  const account = accountFor(thread.account_id);
-  const payload = {
+  const payload = debugPayload(thread, messages, "thread");
+  const copied = await copyText(JSON.stringify(payload, null, 2));
+  toast(
+    copied ? "Copied email debug data" : "Could not copy debug data",
+    !copied
+  );
+}
+
+function messageDebugData(message) {
+  return {
+    id: message.id,
+    thread_id: message.thread_id,
+    subject: message.subject,
+    from_name: message.from_name,
+    from_email: message.from_email,
+    to: message.to || [],
+    cc: message.cc || [],
+    bcc: message.bcc || [],
+    date: message.date,
+    labels: message.labels || [],
+    snippet: message.snippet,
+    message_id: message.message_id,
+    body_text: message.body_text || "",
+    body_html: message.body_html || "",
+    attachments: (message.attachments || []).map((item) => ({
+      filename: item.filename,
+      mime: item.mime,
+      size: item.size,
+      inline: Boolean(item.inline),
+      content_id: item.content_id || "",
+    })),
+    debug: inspectEmailForDebug(message, {
+      contentTheme: state.prefs.emailTheme,
+    }),
+  };
+}
+
+function debugPayload(thread, messages, scope) {
+  const account = thread ? accountFor(thread.account_id) : null;
+  return {
     courier_debug: 1,
+    scope,
     generated_at: new Date().toISOString(),
     client_theme: state.prefs.theme,
     email_theme: state.prefs.emailTheme,
@@ -6304,45 +6626,41 @@ async function copyThreadDebug() {
           color: account.color,
         }
       : null,
-    thread: {
-      id: thread.id,
-      subject: thread.subject,
-      message_count: thread.message_count,
-      last_date: thread.last_date,
-      labels: thread.labels || [],
-    },
-    messages: messages.map((message) => ({
-      id: message.id,
-      thread_id: message.thread_id,
-      subject: message.subject,
-      from_name: message.from_name,
-      from_email: message.from_email,
-      to: message.to || [],
-      cc: message.cc || [],
-      bcc: message.bcc || [],
-      date: message.date,
-      labels: message.labels || [],
-      snippet: message.snippet,
-      message_id: message.message_id,
-      body_text: message.body_text || "",
-      body_html: message.body_html || "",
-      attachments: (message.attachments || []).map((item) => ({
-        filename: item.filename,
-        mime: item.mime,
-        size: item.size,
-        inline: Boolean(item.inline),
-        content_id: item.content_id || "",
-      })),
-      debug: inspectEmailForDebug(message, {
-        contentTheme: state.prefs.emailTheme,
-      }),
-    })),
+    thread: thread
+      ? {
+          id: thread.id,
+          subject: thread.subject,
+          message_count: thread.message_count,
+          last_date: thread.last_date,
+          labels: thread.labels || [],
+        }
+      : null,
+    messages: (messages || []).map(messageDebugData),
   };
+}
+
+async function copyMessageDebug(message) {
+  const thread = currentThread();
+  if (!thread || !message) return;
+  const payload = debugPayload(thread, [message], "message");
   const copied = await copyText(JSON.stringify(payload, null, 2));
   toast(
     copied ? "Copied email debug data" : "Could not copy debug data",
     !copied
   );
+}
+
+function openMessageContextMenu(messageId, x, y) {
+  const message = currentMessages().find((item) => item.id === messageId);
+  if (!message) return;
+  openMenuAt(x, y, [
+    {
+      label: "Copy email debug content",
+      action: "message-debug-copy",
+      icon: "copy",
+      attrs: `data-message-id="${esc(message.id)}"`,
+    },
+  ]);
 }
 
 function threadMenu(anchor) {
@@ -7865,6 +8183,12 @@ async function handleAction(element, event) {
     case "thread-debug-copy":
       await copyThreadDebug();
       return;
+    case "message-debug-copy": {
+      const messageId = element.dataset.messageId || "";
+      const message = currentMessages().find((item) => item.id === messageId);
+      if (message) await copyMessageDebug(message);
+      return;
+    }
     case "thread-spam":
       await actOnThread("spam");
       return;
@@ -8178,6 +8502,12 @@ async function handleAction(element, event) {
     case "update-check":
       await checkForUpdates();
       return;
+    case "update-apply":
+      await applyUpdate();
+      return;
+    case "update-restart":
+      await restartCourier();
+      return;
     case "update-open":
       if (state.updateResult && state.updateResult.url) {
         try {
@@ -8419,6 +8749,16 @@ function bindEvents() {
         event.clientY
       );
       return;
+    }
+    const messageHeader = target.closest?.(".message-header");
+    if (messageHeader) {
+      const article = messageHeader.closest?.(".message, .collapsed-message");
+      const messageId = article?.dataset.messageId || "";
+      if (messageId) {
+        event.preventDefault();
+        openMessageContextMenu(messageId, event.clientX, event.clientY);
+        return;
+      }
     }
     const composerImage = target.closest?.(".composer-editor img");
     if (composerImage) {
