@@ -528,6 +528,67 @@ def run_gui(app: App, minimized: bool = False) -> int:
         done.wait(timeout=300)
         return result.get("path", "")
 
+    def choose_inline_image() -> str:
+        result: dict[str, str] = {}
+        done = threading.Event()
+
+        def show() -> bool:
+            dialog = None
+            try:
+                dialog = Gtk.FileChooserDialog(
+                    title="Insert image",
+                    transient_for=window,
+                    action=Gtk.FileChooserAction.OPEN,
+                )
+                dialog.add_buttons(
+                    "Cancel",
+                    Gtk.ResponseType.CANCEL,
+                    "Insert",
+                    Gtk.ResponseType.ACCEPT,
+                )
+                image_filter = Gtk.FileFilter()
+                image_filter.set_name("Images")
+                try:
+                    image_filter.add_pixbuf_formats()
+                except Exception:
+                    pass
+                for pattern in (
+                    "*.png",
+                    "*.jpg",
+                    "*.jpeg",
+                    "*.gif",
+                    "*.webp",
+                    "*.bmp",
+                    "*.svg",
+                ):
+                    image_filter.add_pattern(pattern)
+                dialog.add_filter(image_filter)
+                pictures = GLib.get_user_special_dir(
+                    GLib.UserDirectory.DIRECTORY_PICTURES
+                )
+                downloads = GLib.get_user_special_dir(
+                    GLib.UserDirectory.DIRECTORY_DOWNLOAD
+                )
+                start = downloads or pictures
+                if start and Path(start).is_dir():
+                    dialog.set_current_folder(start)
+                response = dialog.run()
+                result["path"] = ""
+                if response == Gtk.ResponseType.ACCEPT:
+                    result["path"] = dialog.get_filename() or ""
+            except Exception as exc:
+                app.log(f"inline image chooser failed: {exc!r}")
+                result["path"] = ""
+            finally:
+                if dialog is not None:
+                    dialog.destroy()
+                done.set()
+            return False
+
+        GLib.idle_add(show)
+        done.wait(timeout=300)
+        return result.get("path", "")
+
     def open_attachment_file(path: Path, filename: str) -> bool:
         GLib.idle_add(lambda: launch_attachment(path, filename) or False)
         return True
@@ -537,6 +598,7 @@ def run_gui(app: App, minimized: bool = False) -> int:
     app.download_attachment = download_attachment
     app.choose_attachments = choose_attachments
     app.choose_oauth_json = choose_oauth_json
+    app.choose_inline_image = choose_inline_image
 
     def on_file_chooser(_webview, request):
         dialog = None
@@ -671,8 +733,10 @@ def run_gui(app: App, minimized: bool = False) -> int:
         on_open=lambda account_id, thread_id: GLib.idle_add(
             open_notification_thread, account_id, thread_id
         ),
+        on_update=lambda _version: open_update_settings(),
     )
     monitor.start()
+    app.notify_update = monitor.notify_update
     unread_baseline = 0
     if app.store.accounts() and os.environ.get("COURIER_DEMO") != "1":
         try:
@@ -781,6 +845,17 @@ def run_gui(app: App, minimized: bool = False) -> int:
                 )
                 return False
             GLib.timeout_add(180, apply_account)
+
+    def open_update_settings() -> None:
+        show_window()
+
+        def apply_updates() -> bool:
+            run_js(
+                "window.courierOpenUpdates && window.courierOpenUpdates()"
+            )
+            return False
+
+        GLib.timeout_add(320, apply_updates)
 
     def open_notification_thread(account_id: str, thread_id: str) -> None:
         show_window()

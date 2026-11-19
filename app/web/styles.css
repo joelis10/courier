@@ -2689,6 +2689,10 @@ body.lightbox-open {
   overflow-wrap: break-word;
 }
 
+.composer-editor.has-image-tools {
+  padding-bottom: 62px;
+}
+
 .composer-editor:empty::before {
   content: attr(data-placeholder);
   color: var(--muted);
@@ -2704,6 +2708,110 @@ body.lightbox-open {
   padding-left: 10px;
   border-left: 2px solid var(--border);
   color: var(--muted);
+}
+
+body.composer-image-resizing {
+  user-select: none;
+}
+
+.composer-image-tools {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px var(--accent-ink), 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+}
+
+.composer-image-tools[hidden] {
+  display: none;
+}
+
+.composer-image-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--accent-ink);
+  border-radius: 2px;
+  background: var(--paper);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+}
+
+.composer-image-handle[data-corner="nw"] {
+  left: -5px;
+  top: -5px;
+  cursor: nwse-resize;
+}
+
+.composer-image-handle[data-corner="ne"] {
+  right: -5px;
+  top: -5px;
+  cursor: nesw-resize;
+}
+
+.composer-image-handle[data-corner="sw"] {
+  left: -5px;
+  bottom: -5px;
+  cursor: nesw-resize;
+}
+
+.composer-image-handle[data-corner="se"] {
+  right: -5px;
+  bottom: -5px;
+  cursor: nwse-resize;
+}
+
+.composer-image-actions {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  box-shadow: 0 2px 7px rgba(20, 28, 36, 0.16);
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+.composer-image-action {
+  height: 23px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+}
+
+.composer-image-action:hover {
+  border-color: var(--border);
+  background: var(--field);
+  color: var(--text);
+}
+
+.cursor-hint {
+  position: fixed;
+  z-index: 400;
+  transform: translateY(-50%);
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--toast);
+  color: var(--toast-text);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.cursor-hint.visible {
+  opacity: 1;
 }
 
 .format-bar {
@@ -2888,9 +2996,27 @@ body.lightbox-open {
   overflow-wrap: anywhere;
 }
 
+.composer-size {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.composer-size.over {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .composer-foot .send-btn {
   min-width: 64px;
-  margin-left: auto;
+  margin-left: 0;
+}
+
+.composer-foot .send-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .composer-foot .send-btn .spinner {
@@ -3533,7 +3659,7 @@ body.lightbox-open {
 }
 
 .composer-foot .send-btn {
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .theme-swatches {

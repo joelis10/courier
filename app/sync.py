@@ -345,7 +345,7 @@ class SyncManager:
             "archive": (
                 "archive",
                 None,
-                "-in:inbox -in:spam -in:trash -in:sent -in:drafts",
+                "-in:inbox -in:spam -in:trash -in:drafts",
             ),
         }
         return mapping.get(folder, mapping["inbox"])

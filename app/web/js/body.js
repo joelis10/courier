@@ -581,7 +581,7 @@ function baseCss(theme) {
     overflow-wrap:break-word;
     -webkit-text-size-adjust:100%;
   }
-  img { max-width:100% !important; height:auto; }
+  img { max-width:100% !important; height:auto !important; }
   table { max-width:100% !important; }
   pre { white-space:pre-wrap; overflow-wrap:break-word; }
   blockquote { margin: 0 0 0 12px; padding-left: 12px; border-left: 2px solid ${theme.quote}; color:${theme.muted}; }
@@ -618,6 +618,7 @@ function fitWideEmail(doc) {
     const max = doc.documentElement.clientWidth || doc.body.clientWidth || 0;
     if (!max) return;
     for (const element of doc.querySelectorAll("[width]")) {
+      if (element.tagName === "IMG") continue;
       const width = parseInt(element.getAttribute("width") || "0", 10);
       if (width > max) {
         element.setAttribute("width", "100%");
@@ -627,6 +628,7 @@ function fitWideEmail(doc) {
       }
     }
     for (const element of doc.querySelectorAll("[style]")) {
+      if (element.tagName === "IMG") continue;
       const style = element.getAttribute("style") || "";
       const widths = [
         ...style.matchAll(/(?:^|;)\s*(?:min-)?width\s*:\s*(\d+)px/gi),

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.ai import clean_email_body
+from app.ai import _strip_thinking, clean_email_body
 from app.notifications import NotificationMonitor
 from app.server import _clean_ui_prefs, _outgoing_name
 from app.gmail import (
@@ -461,6 +461,31 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(counts["total"]["spam"]["unread"], 1)
         self.assertGreaterEqual(counts["total"]["archive"]["total"], 1)
 
+    def test_archived_reply_is_in_archive(self):
+        self.store.upsert_thread(
+            {
+                "account_id": "a1",
+                "id": "sent-reply",
+                "subject": "Re: archived reply",
+                "snippet": "",
+                "last_date": 1200,
+                "message_count": 2,
+                "labels": ["SENT", "CATEGORY_PERSONAL"],
+                "unread": False,
+                "starred": False,
+                "has_attachment": False,
+                "participants": [],
+                "sender_name": "Ana",
+                "sender_email": "ana@example.com",
+            }
+        )
+        archive_ids = [
+            thread["id"]
+            for thread in self.store.list_threads(folder="archive")
+        ]
+        self.assertIn("sent-reply", archive_ids)
+        self.assertNotIn("sent", archive_ids)
+
     def test_custom_views_filter_and_persist(self):
         self.store.upsert_thread(
             {
@@ -894,6 +919,11 @@ class FakeNotifyStore:
     def get_account(self, _account_id):
         return None
 
+    def get_setting(self, key):
+        if key == "ui_prefs":
+            return '{"notifySound":"none"}'
+        return None
+
 
 class AIBodyCleanTests(unittest.TestCase):
     def test_html_quote_and_signature_containers_are_removed(self):
@@ -957,12 +987,36 @@ class AIBodyCleanTests(unittest.TestCase):
             "Thanks,\nJane",
         )
 
+    def test_thinking_blocks_and_tags_are_removed(self):
+        self.assertEqual(
+            _strip_thinking("<think>hidden reasoning</think>John needs a reset."),
+            "John needs a reset.",
+        )
+        self.assertEqual(
+            _strip_thinking("John needs a reset.</think>"),
+            "John needs a reset.",
+        )
+        self.assertEqual(
+            _strip_thinking("hidden reasoning</think>John needs a reset."),
+            "John needs a reset.",
+        )
+        self.assertEqual(_strip_thinking("<thinking>still thinking"), "")
+
 
 class UIPrefsTests(unittest.TestCase):
     def test_ai_and_google_setup_are_off_by_default(self):
         prefs = _clean_ui_prefs({})
         self.assertFalse(prefs["aiEnabled"])
         self.assertFalse(prefs["googleSetupSeen"])
+        self.assertFalse(prefs["updateAuto"])
+        self.assertEqual(prefs["updateInterval"], 5)
+        self.assertTrue(_clean_ui_prefs({"updateAuto": True})["updateAuto"])
+        self.assertEqual(
+            _clean_ui_prefs({"updateInterval": 8})["updateInterval"], 8
+        )
+        self.assertEqual(
+            _clean_ui_prefs({"updateInterval": 3})["updateInterval"], 5
+        )
 
     def test_ai_and_google_setup_booleans_are_preserved(self):
         prefs = _clean_ui_prefs(
@@ -1048,6 +1102,32 @@ class NotificationTests(unittest.TestCase):
 
         note.emit_closed()
         self.assertNotIn(note, self.monitor.active)
+
+    def test_update_notification_opens_updates(self):
+        self.updated = []
+        self.monitor.on_update = lambda version: self.updated.append(version)
+        sent = self.monitor._send_notification(
+            "Courier 1.2.0 is available",
+            "Open Settings to download it.",
+            self.prefs,
+            ("__update__", "1.2.0"),
+        )
+        self.assertTrue(sent)
+        note = FakeNotify.created[-1]
+        action, _label, callback, target = note.actions[0]
+        callback(note, action, target)
+        self.assertEqual(self.updated, ["1.2.0"])
+
+    def test_notify_update_includes_version(self):
+        self.updated = []
+        self.monitor.on_update = lambda version: self.updated.append(version)
+        self.assertTrue(self.monitor.notify_update("1.2.0"))
+        note = FakeNotify.created[-1]
+        self.assertIn("1.2.0", note.title)
+        self.assertIn("1.2.0", note.body)
+        action, _label, callback, target = note.actions[0]
+        callback(note, action, target)
+        self.assertEqual(self.updated, ["1.2.0"])
 
     def test_test_notification_has_no_action(self):
         self.monitor._send_test(self.prefs)

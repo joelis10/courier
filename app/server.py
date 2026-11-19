@@ -15,12 +15,15 @@ import re
 import secrets
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from . import APP_VERSION
 from .ai import AIClient, AIError, message_messages, thread_messages
 from .gmail import AuthError, GmailClient, GmailError, parse_message
 from .store import FOLDERS, Store
@@ -35,6 +38,11 @@ def _outgoing_name(account) -> str:
     local = email.split("@")[0]
     name = str(account["name"] or "").strip()
     return name or local
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", str(value or ""))
+    return tuple(int(part) for part in parts[:4]) or (0,)
 
 UI_THEMES = {"fog", "linen", "sepia", "graphite", "midnight"}
 UI_EMAIL_THEMES = {"fog", "linen", "sepia", "graphite", "midnight"}
@@ -68,6 +76,8 @@ UI_PREF_DEFAULTS = {
     "notifyAIMinChars": 400,
     "aiEnabled": False,
     "googleSetupSeen": False,
+    "updateAuto": False,
+    "updateInterval": 5,
 }
 UI_BOOLEAN_PREFS = {
     "hideSignatures",
@@ -80,6 +90,7 @@ UI_BOOLEAN_PREFS = {
     "notifyUseAI",
     "aiEnabled",
     "googleSetupSeen",
+    "updateAuto",
 }
 
 
@@ -182,6 +193,13 @@ def _clean_ui_prefs(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         min_chars = 400
     prefs["notifyAIMinChars"] = min(5000, max(80, min_chars))
+    update_interval = value.get("updateInterval")
+    if (
+        isinstance(update_interval, int)
+        and not isinstance(update_interval, bool)
+        and update_interval in (1, 5, 8)
+    ):
+        prefs["updateInterval"] = update_interval
     return prefs
 
 
@@ -244,6 +262,8 @@ class App:
         self.download_attachment = None
         self.choose_attachments = None
         self.choose_oauth_json = None
+        self.choose_inline_image = None
+        self.notify_update = None
 
     # ------------------------------------------------------------------ util
 
@@ -296,6 +316,7 @@ class App:
     def state(self) -> dict[str, Any]:
         counts = self.store.counts()
         return {
+            "version": APP_VERSION,
             "accounts": [self.account_public(row) for row in self.store.accounts()],
             "counts": counts["total"],
             "labels": self.store.label_summary(),
@@ -385,9 +406,30 @@ class ApiHandler(BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return {}
-        if length > 30 * 1024 * 1024:
+        try:
+            self.connection.settimeout(180)
+        except OSError:
+            pass
+        if length > 50 * 1024 * 1024:
+            # Read the oversized upload before responding. If the connection is
+            # closed while the browser is still sending, WebKit can leave the
+            # request pending and the UI stuck on a spinner.
+            remaining = min(length, 64 * 1024 * 1024)
+            try:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
+            self.close_connection = True
             raise ApiError("Request body is too large.", status=413)
-        raw = self.rfile.read(length)
+        try:
+            raw = self.rfile.read(length)
+        except OSError as exc:
+            self.close_connection = True
+            raise ApiError("Could not read the request.", status=408) from exc
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -500,6 +542,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if url.path == "/api/choose-attachments":
                     self._choose_attachments(payload)
                     return
+                if url.path == "/api/choose-inline-image":
+                    self._choose_inline_image()
+                    return
                 if url.path == "/api/open-composer-attachment":
                     self._open_composer_attachment(payload)
                     return
@@ -514,6 +559,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return
                 if url.path == "/api/notify/test":
                     self._request_test_notification()
+                    return
+                if url.path == "/api/update/check":
+                    self._check_updates()
                     return
                 if url.path == "/api/threads/older":
                     result = self.app.sync.fetch_older(
@@ -668,7 +716,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         account_id: str,
         thread_id: str,
         messages: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, bool]:
         parsed = None
         for message in messages or []:
             if "DRAFT" in (message.get("labels") or []):
@@ -677,10 +725,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                 ):
                     parsed = message
         try:
-            listing = self.app.gmail.list_drafts(account_id, max_results=100)
+            listing = self.app.gmail.list_drafts(account_id, max_results=500)
         except GmailError as exc:
             self.app.log(f"draft list failed: {exc.message}")
-            return None
+            return None, False
         draft_id = ""
         for item in listing.get("drafts") or []:
             message = item.get("message") or {}
@@ -688,16 +736,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 draft_id = item.get("id") or ""
                 break
         if not draft_id:
-            return None
+            return None, True
         if parsed is None:
             try:
                 draft = self.app.gmail.get_draft(account_id, draft_id)
             except GmailError as exc:
+                if exc.status == 404:
+                    return None, True
                 self.app.log(f"draft load failed: {exc.message}")
-                return None
+                return None, False
             message = draft.get("message") or {}
             if not message:
-                return None
+                return None, True
             parsed = parse_message(account_id, message)
         attachments: list[dict[str, Any]] = []
         downloaded = 0
@@ -767,7 +817,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             "thread_id": thread_id,
             "message_id": parsed.get("id") or "",
             "payload": payload,
-        }
+        }, True
 
     def _get_thread(
         self,
@@ -800,16 +850,64 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.app.log(f"mark-read {thread_id} failed: {exc}")
         draft = None
+        draft_list_ok = False
+        legacy_drafts = self.app.store.thread_drafts(account_id, thread_id)
         if thread and "DRAFT" in (thread.get("labels") or []):
-            draft = self._thread_draft(
+            draft, draft_list_ok = self._thread_draft(
                 account_id, thread_id, entry.get("messages")
             )
+            if draft is None and draft_list_ok and not legacy_drafts:
+                # list_drafts is capped, so confirm against the Gmail thread
+                # itself before treating the local DRAFT row as stale.
+                has_gmail_draft = None
+                gmail_thread_missing = False
+                try:
+                    gmail_thread = self.app.gmail.get_thread(
+                        account_id, thread_id, fmt="metadata"
+                    )
+                    has_gmail_draft = any(
+                        "DRAFT" in (message.get("labelIds") or [])
+                        for message in gmail_thread.get("messages") or []
+                    )
+                except GmailError as exc:
+                    if exc.status == 404:
+                        has_gmail_draft = False
+                        gmail_thread_missing = True
+                    else:
+                        self.app.log(
+                            f"draft thread check failed: {exc.message}"
+                        )
+                if has_gmail_draft is False:
+                    if gmail_thread_missing:
+                        self.app.store.delete_thread(account_id, thread_id)
+                        raise ApiError(
+                            "This draft is no longer in Gmail.", status=404
+                        )
+                    visible = [
+                        message
+                        for message in entry.get("messages") or []
+                        if "DRAFT" not in (message.get("labels") or [])
+                    ]
+                    if not visible:
+                        self.app.store.delete_thread(account_id, thread_id)
+                        raise ApiError(
+                            "This draft is no longer in Gmail.", status=404
+                        )
+                    labels = [
+                        label
+                        for label in thread.get("labels") or []
+                        if label != "DRAFT"
+                    ]
+                    self.app.store.update_thread(
+                        account_id, thread_id, labels=labels
+                    )
+                    thread = self.app.store.get_thread(account_id, thread_id)
         self._send_json(
             entry
             | {
                 "thread": thread,
                 "draft": draft,
-                "drafts": self.app.store.thread_drafts(account_id, thread_id),
+                "drafts": legacy_drafts,
             }
         )
 
@@ -883,6 +981,30 @@ class ApiHandler(BaseHTTPRequestHandler):
             }
         )
 
+    def _delete_thread_drafts(
+        self, account_id: str, thread_id: str, except_id: str = ""
+    ) -> None:
+        try:
+            listing = self.app.gmail.list_drafts(account_id, max_results=500)
+            for item in listing.get("drafts") or []:
+                other_id = item.get("id") or ""
+                message = item.get("message") or {}
+                if (
+                    other_id
+                    and other_id != except_id
+                    and message.get("threadId") == thread_id
+                ):
+                    try:
+                        self.app.gmail.delete_draft(account_id, other_id)
+                    except GmailError as exc:
+                        if exc.status != 404:
+                            self.app.log(
+                                "extra draft cleanup failed: "
+                                f"{exc.message}"
+                            )
+        except GmailError as exc:
+            self.app.log(f"draft cleanup failed: {exc.message}")
+
     def _delete_draft(self, payload: dict[str, Any]) -> None:
         account_id = str(payload.get("account") or "")
         draft_id = str(payload.get("draft_id") or "")
@@ -900,31 +1022,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if exc.status != 404:
                     raise
             if thread_id:
-                try:
-                    listing = self.app.gmail.list_drafts(
-                        account_id, max_results=100
-                    )
-                    for item in listing.get("drafts") or []:
-                        other_id = item.get("id") or ""
-                        message = item.get("message") or {}
-                        if (
-                            other_id
-                            and other_id != draft_id
-                            and message.get("threadId") == thread_id
-                        ):
-                            try:
-                                self.app.gmail.delete_draft(
-                                    account_id, other_id
-                                )
-                            except GmailError as exc:
-                                if exc.status != 404:
-                                    self.app.log(
-                                        "extra draft cleanup failed: "
-                                        f"{exc.message}"
-                                    )
-                except GmailError as exc:
-                    self.app.log(f"draft cleanup failed: {exc.message}")
+                self._delete_thread_drafts(
+                    account_id, thread_id, except_id=draft_id
+                )
                 self._refresh_thread_metadata(account_id, thread_id)
+            self._send_json({"deleted": True, "thread_id": thread_id})
+            return
+        if thread_id:
+            account = self.app.store.get_account(account_id)
+            if not account:
+                raise ApiError("Account not found.", 404)
+            self._delete_thread_drafts(account_id, thread_id)
+            self._refresh_thread_metadata(account_id, thread_id)
             self._send_json({"deleted": True, "thread_id": thread_id})
             return
         self._send_json({"deleted": True})
@@ -984,6 +1093,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         gmail = self.app.gmail
         store = self.app.store
 
+        def drop_missing() -> None:
+            store.delete_thread(account_id, thread_id)
+            self._send_json({"thread": None, "state": self.app.state()})
+
         if action == "read":
             gmail.modify_thread(account_id, thread_id, remove=["UNREAD"])
             labels.discard("UNREAD")
@@ -1003,24 +1116,52 @@ class ApiHandler(BaseHTTPRequestHandler):
             labels.discard("STARRED")
             store.update_thread(account_id, thread_id, labels=sorted(labels), starred=0)
         elif action == "archive":
-            gmail.modify_thread(account_id, thread_id, remove=["INBOX"])
+            try:
+                gmail.modify_thread(account_id, thread_id, remove=["INBOX"])
+            except GmailError as exc:
+                if exc.status != 404:
+                    raise
+                drop_missing()
+                return
             labels.discard("INBOX")
             store.update_thread(account_id, thread_id, labels=sorted(labels))
         elif action == "spam":
-            gmail.modify_thread(account_id, thread_id, add=["SPAM"], remove=["INBOX"])
+            try:
+                gmail.modify_thread(
+                    account_id, thread_id, add=["SPAM"], remove=["INBOX"]
+                )
+            except GmailError as exc:
+                if exc.status != 404:
+                    raise
+                drop_missing()
+                return
             labels.discard("INBOX")
             labels.add("SPAM")
             store.update_thread(account_id, thread_id, labels=sorted(labels))
         elif action == "inbox":
-            if "TRASH" in labels:
-                gmail.untrash_thread(account_id, thread_id)
-                labels.discard("TRASH")
-            gmail.modify_thread(account_id, thread_id, add=["INBOX"], remove=["SPAM"])
+            try:
+                if "TRASH" in labels:
+                    gmail.untrash_thread(account_id, thread_id)
+                    labels.discard("TRASH")
+                gmail.modify_thread(
+                    account_id, thread_id, add=["INBOX"], remove=["SPAM"]
+                )
+            except GmailError as exc:
+                if exc.status != 404:
+                    raise
+                drop_missing()
+                return
             labels.discard("SPAM")
             labels.add("INBOX")
             store.update_thread(account_id, thread_id, labels=sorted(labels))
         elif action == "trash":
-            gmail.trash_thread(account_id, thread_id)
+            try:
+                gmail.trash_thread(account_id, thread_id)
+            except GmailError as exc:
+                if exc.status != 404:
+                    raise
+                drop_missing()
+                return
             labels.discard("INBOX")
             labels.discard("SPAM")
             labels.add("TRASH")
@@ -1087,18 +1228,92 @@ class ApiHandler(BaseHTTPRequestHandler):
         raw = self._mail_raw(account, payload)
         thread_id = str(payload.get("thread_id") or "") or None
         draft_id = str(payload.get("draft_id") or "")
+        draft_thread = str(payload.get("draft_thread_id") or "")
+        draft_pending = bool(payload.get("draft_pending"))
         result = self.app.gmail.send_raw(account_id, raw, thread_id=thread_id)
         if draft_id:
             try:
                 self.app.gmail.delete_draft(account_id, draft_id)
             except Exception as exc:
                 self.app.log(f"draft cleanup failed: {exc!r}")
-            draft_thread = str(payload.get("draft_thread_id") or "")
-            if draft_thread:
-                self._refresh_thread_metadata(account_id, draft_thread)
+        cleanup_thread = draft_thread or thread_id or ""
+        if cleanup_thread and (draft_id or draft_thread or draft_pending):
+            self._delete_thread_drafts(
+                account_id, cleanup_thread, except_id=draft_id
+            )
+            self._refresh_thread_metadata(account_id, cleanup_thread)
         self._send_json({"id": result.get("id"), "thread_id": result.get("threadId")})
 
     # ------------------------------------------------------------------ search
+
+    def _check_updates(self) -> None:
+        url = (
+            "https://api.github.com/repos/joelis10/courier/"
+            "releases/latest"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": f"Courier/{APP_VERSION}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise ApiError("No published Courier release was found.", 404)
+            if exc.code == 403:
+                raise ApiError(
+                    "GitHub update checks are rate limited. Try again later.",
+                    429,
+                )
+            raise ApiError(
+                f"GitHub returned {exc.code} while checking for updates.",
+                502,
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ApiError(
+                "Could not reach GitHub to check for updates.", 502
+            ) from exc
+        tag = str(data.get("tag_name") or "").strip()
+        latest = tag.lstrip("vV")
+        if not latest:
+            raise ApiError("GitHub returned an invalid release.", 502)
+        newer = _version_key(latest) > _version_key(APP_VERSION)
+        notified_version = (
+            self.app.store.get_setting("update_notified_version") or ""
+        )
+        notification_sent = False
+        if newer and notified_version != latest:
+            notifier = getattr(self.app, "notify_update", None)
+            if callable(notifier):
+                try:
+                    notification_sent = bool(notifier(latest))
+                except Exception as exc:
+                    self.app.log(f"update notification failed: {exc!r}")
+                if notification_sent:
+                    self.app.store.set_setting(
+                        "update_notified_version", latest
+                    )
+                    notified_version = latest
+        self._send_json(
+            {
+                "current": APP_VERSION,
+                "latest": latest,
+                "tag": tag,
+                "name": str(data.get("name") or ""),
+                "url": str(data.get("html_url") or ""),
+                "published_at": str(data.get("published_at") or ""),
+                "newer": newer,
+                "notification_sent": notification_sent,
+                "notified_version": notified_version,
+                "checked_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                ),
+            }
+        )
 
     def _search(self, payload: dict[str, Any]) -> None:
         query = str(payload.get("q") or "").strip()
@@ -1386,6 +1601,38 @@ class ApiHandler(BaseHTTPRequestHandler):
                 }
             )
         self._send_json({"files": files})
+
+    def _choose_inline_image(self) -> None:
+        chooser = getattr(self.app, "choose_inline_image", None)
+        if not callable(chooser):
+            raise ApiError(
+                "Image insertion is only available in the desktop window.",
+                503,
+            )
+        path = chooser()
+        if not path:
+            self._send_json({"file": None})
+            return
+        file_path = Path(path)
+        try:
+            data = file_path.read_bytes()
+        except OSError as exc:
+            raise ApiError("Could not read the image.") from exc
+        if len(data) > 10 * 1024 * 1024:
+            raise ApiError("Inline images must be smaller than 10 MB.", 400)
+        mime = mimetypes.guess_type(file_path.name)[0] or ""
+        if not mime.startswith("image/"):
+            raise ApiError("Choose an image file.", 400)
+        self._send_json(
+            {
+                "file": {
+                    "filename": file_path.name,
+                    "mime": mime,
+                    "size": len(data),
+                    "data": base64.b64encode(data).decode("ascii"),
+                }
+            }
+        )
 
     def _remove_account(self, payload: dict[str, Any]) -> None:
         account_id = str(payload.get("id") or "")

@@ -26,7 +26,7 @@ FOLDER_LABELS = {
     "spam": ("SPAM",),
     "trash": ("TRASH",),
 }
-NON_ARCHIVE_LABELS = ("INBOX", "SPAM", "TRASH", "SENT", "DRAFT")
+NON_ARCHIVE_LABELS = ("INBOX", "SPAM", "TRASH", "DRAFT")
 
 
 def _json(value: Any, default: Any) -> Any:
@@ -597,7 +597,10 @@ class Store:
             placeholders = ",".join("?" for _ in NON_ARCHIVE_LABELS)
             return (
                 "NOT EXISTS (SELECT 1 FROM json_each(t.labels) "
-                f"WHERE json_each.value IN ({placeholders}))",
+                f"WHERE json_each.value IN ({placeholders})) "
+                "AND (NOT EXISTS (SELECT 1 FROM json_each(t.labels) "
+                "WHERE json_each.value = 'SENT') "
+                "OR COALESCE(t.message_count, 0) > 1)",
                 list(NON_ARCHIVE_LABELS),
             )
         if folder in FOLDER_LABELS:
@@ -740,12 +743,15 @@ class Store:
         return matches[offset : offset + limit], total
 
     def all_thread_summaries(self) -> list[dict[str, Any]]:
-        rows = self._rows("SELECT account_id, labels, unread FROM threads")
+        rows = self._rows(
+            "SELECT account_id, labels, unread, message_count FROM threads"
+        )
         return [
             {
                 "account_id": row["account_id"],
                 "labels": _json(row["labels"], []),
                 "unread": bool(row["unread"]),
+                "message_count": row["message_count"] or 0,
             }
             for row in rows
         ]
@@ -1122,7 +1128,8 @@ class Store:
             if "TRASH" in labels:
                 folder_hits.append("trash")
             if not any(label in labels for label in NON_ARCHIVE_LABELS):
-                folder_hits.append("archive")
+                if "SENT" not in labels or int(row["message_count"] or 0) > 1:
+                    folder_hits.append("archive")
             acct = touch(row["account_id"])
             unread = bool(row["unread"])
             for folder in folder_hits:

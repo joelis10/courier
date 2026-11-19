@@ -98,6 +98,9 @@ docs/
 .dev/            ignored local demo DB, Chrome profile, helper scripts, screenshots
 ```
 
+`app/__init__.py` defines `APP_VERSION`; bump it with each release. The Updates section
+compares it with the latest GitHub release tag returned by `releases/latest`.
+
 ### Network and auth
 
 - The HTTP server binds only to `127.0.0.1` and uses a random per-run page token.
@@ -158,7 +161,11 @@ docs/
   all-mail, spam, and trash thread IDs, then metadata for each in a 4-worker pool.
   Incremental sync uses Gmail history plus a recent-list safety net. Bodies are loaded
   only when a thread is opened and are cached in SQLite. Remote search queries Gmail
-  and caches returned threads.
+  and caches returned threads. Messages and drafts above 2 MB use the Gmail multipart
+  upload endpoint instead of base64 JSON, which Gmail rejects around 5 MB. The MIME payload
+  is capped at 34 MiB. Send and draft requests use XHR with a native timeout and upload
+  progress; a send never waits for an in-flight draft save, and aborts it first. `_read_json`
+  drains rejected oversized bodies and closes the connection before returning 413.
 
 ### Security
 
@@ -250,7 +257,13 @@ docs/
   not in Notifications.
 - Settings is a page in `.main`, not an overlay. It hides the list and reader, marks the
   Settings sidebar row active, and dismisses when Inbox, All Accounts, a folder, a label,
-  search, or Compose is used. The header is full width and has no back button.
+  search, or Compose is used. The header is full width and has no back button. The Updates
+  section compares `APP_VERSION` with GitHub's latest release. Automatic checks are off by
+  default; when enabled they run after 15 seconds and then at 1, 5, or 8 hour intervals.
+  `POST /api/update/check` returns the latest tag, URL, and whether it is newer. A newer
+  version sends one desktop notification per version with the version in the title; clicking
+  it opens Settings and scrolls to Updates. Manual status lives in `#update-status`;
+  automatic checks only toast once per version when no desktop notification was sent.
 - Accounts own their labels in the sidebar. Each account row has a disclosure control;
   labels are nested beneath it, five at a time with Show more. All accounts is expandable
   too and shows merged labels. Selecting an account where the current label does not exist
@@ -327,7 +340,17 @@ docs/
   object for DRAFT threads; `_thread_draft` pulls the composer payload from the parsed
   draft message, downloads attachments, and converts inline `cid:` images to data URLs.
   `restoreThreadDraft` opens new-message drafts full-height as `Draft · New message` and
-  reply drafts minimized above the thread. Sending deletes the Gmail draft.
+  reply drafts minimized above the thread. Sending deletes the Gmail draft. A restored
+  draft with an empty `subject` keeps the `Re:`/`Fwd:` subject derived from the thread;
+  never let a blank draft subject override it. `primeComposerDraftBaseline()` recomputes
+  `initialSignature` and `draftSignature` from the rendered editor after opening or
+  restoring a draft, including inline images converted to CIDs. Merely opening a draft must
+  not save it back to Gmail or bump its thread date. If a DRAFT thread no longer has a Gmail
+  draft and no legacy payload, `_get_thread` removes the ghost thread (or drops the stale
+  DRAFT label when real messages remain); a Gmail 404 on archive/trash/spam/inbox deletes
+  the local ghost so it can be removed from Drafts. The send endpoint also removes any
+  remaining Gmail drafts in the thread after a send, including a first draft save that was
+  in flight when Send was clicked.
 - DRAFT messages are filtered out of the reader; they belong only to the composer and the
   Drafts folder. `openThread` and `refreshSelectedThreadIfNeeded` both filter message
   labels before assigning `state.selected`, and set the local message count to the visible
@@ -368,7 +391,15 @@ docs/
   raise a toast, not only the inline composer error.
 - Send progress is `#send-status`, a fixed bottom-center popover, deliberately separate
   from the top-right generic toast. It persists with a spinner while `/api/send` is in
-  flight, then says `Message sent` (4.5 seconds) or shows the send error (8 seconds).
+  flight and shows the browser upload percentage, then `Uploading to Gmail… Ns` while the
+  server uploads. It then says `Message sent` (4.5 seconds) or shows the send error
+  (8 seconds). The XHR timeout is five minutes; an in-flight draft save is aborted when
+  sending starts so it cannot hold the send spinner open.
+- The composer foot shows the approximate encoded message size to the left of Send,
+  updated with a 350 ms debounce after typing, pasting, attachments, and image resizing.
+  Above 34 MiB it reads `Too large · …`, disables Send, and suppresses draft saves so an
+  oversized autosave cannot block sync or thread loads. Ctrl/Cmd+Enter still runs the same
+  preflight and shows the error.
 - Reply/Reply all targets are formatted with `formatRecipient`, which keeps the sender’s
   display name (`Jane Doe <jane@example.com>`). Do not format targets as bare emails;
   dropping the name makes recipients fall back to their local-part username. Single-word
@@ -380,8 +411,26 @@ docs/
   is applied to every new composer, even when a thread is still selected behind it, so it
   fills the reader pane; closing it reveals the thread again.
 - The GTK `run-file-chooser` handler opens a native chooser in the Downloads directory for
-  Insert image and sound upload. Only apply a MIME filter when the request has real MIME
-  types other than `*/*`; an empty filter can hide every file.
+  sound upload. Only apply a MIME filter when the request has real MIME types other than
+  `*/*`; an empty filter can hide every file.
+- Composer Insert image does not use the WebKitGTK file input. It calls
+  `POST /api/choose-inline-image`; `run_gui` installs `app.choose_inline_image`, which opens
+  a single-file image chooser in Downloads (falling back to Pictures), returns one base64
+  payload under 10 MB, and the composer inserts it as an inline attachment. The hidden file
+  input remains only as the browser fallback when the native chooser is unavailable.
+- Composer inline images can be resized from four corner handles or with the **Small** and
+  **Original Size** actions below the image. The width and proportional height are written
+  to the image's `width`/`height` attributes and to `width: Npx; height:auto;
+  max-width:100%`, so the size survives Gmail drafts and sending. The selection border,
+  handles, and actions live in `.editor-wrap`, outside `.composer-editor`, and are never
+  serialised into the message. Handles use `--accent-ink` borders and a paper fill so they
+  stay visible on dark themes. Dragging beyond the image's natural width clamps at the
+  original size and shows a small `Already at original size` hint to the right of the
+  corner handle. The hint is positioned once and does not follow the pointer. Right-clicking
+  an inline image opens the custom menu with **Small**, **Original Size**, **Convert to
+  attachment**, and **Delete image**. Converting removes the inline image and adds the same
+  data as a normal composer attachment; deleting removes both the image and its inline
+  attachment entry.
 - Composer Attach does not use an HTML file input. It calls
   `POST /api/choose-attachments`; `run_gui` installs `app.choose_attachments`, which
   schedules `Gtk.FileChooserDialog` on the main loop, waits for the selection thread, and
@@ -463,14 +512,23 @@ docs/
   `window.courierSetWindowActive`, because WebKit's own `document.hidden`/focus state can
   lag behind a tray hide.
 - Labels are alphabetically sorted in every account list; counts never reorder them.
+- Archive means no `INBOX`, `SPAM`, `TRASH`, or `DRAFT` label. Sent-only threads stay out
+  of Archive, but a thread with a sent reply (`SENT` and more than one message) appears once
+  Inbox is removed. This keeps manually archived replies visible without duplicating the
+  Sent folder.
 - `fitWideEmail()` runs after each email frame load and after images load. It clamps tables
   and fixed inline widths, including `min-width`, to the frame width. This handles desktop
-  marketing tables that sit between their mobile breakpoint and design width.
+  marketing tables that sit between their mobile breakpoint and design width. It never
+  rewrites image widths; images keep `max-width:100% !important; height:auto !important`,
+  so inline width/height pairs scale proportionally as the pane narrows and return to their
+  designed size when it widens.
 - Summary overflow only traps wheel scrolling when the summary body actually overflows;
   short summaries let the thread scroll normally.
 - Inline images from a message open in a full-screen viewer. Multiple images from that
   message form a thumbnail carousel; zoom is 100–400% with buttons, +/-/0, arrow keys,
-  and Escape to close. The viewer uses the sanitised, already-allowed image URLs.
+  and Escape to close. The viewer uses the sanitised, already-allowed image URLs. Scrolling
+  over the image zooms toward the pointer: the image is translated and scrolled so the
+  point under the cursor stays put until it reaches the canvas edge.
 - Thread cards and account rows are the only things that intercept right-click. A generic
   right-click elsewhere suppresses WebKit's page menu.
 - Expanded message headers collapse/expand on click except when clicking buttons,
@@ -548,7 +606,9 @@ docs/
   `AIClient.notification_summary(timeout=8)`. The prompt asks for a one-line,
   sender-first action statement such as “John needs his password reset.” The monitor
   falls back to the normal preview on short messages, missing configuration, provider
-  errors, or timeout.
+  errors, or timeout. `_strip_thinking` removes paired and unclosed think/reasoning tags
+  and their content before the notification line is taken; a lone trailing closing tag is
+  removed while keeping the answer before it.
 
 ### Signature and quote detection
 
@@ -582,7 +642,7 @@ CI runs the same tests and JavaScript syntax checks before building the package.
 Debian workflow uses the standard Ubuntu 24.04 GitHub-hosted runner, which is free for
 public repositories. Pushing a `v*` tag attaches the built `.deb` to a GitHub Release.
 
-The 38 tests cover thread metadata extraction, plain-text fallback, inline/attachment
+The 42 tests cover thread metadata extraction, plain-text fallback, inline/attachment
 parsing, MIME construction, folder counting/archive/drafts semantics, thread label updates,
 account metadata, refresh intervals, user-label merging and label paging, folder paging,
 older-page fetching with Gmail page tokens, notification default actions, archived-mail

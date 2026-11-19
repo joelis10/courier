@@ -30,10 +30,11 @@ SOUND_FILES = {
 
 
 class NotificationMonitor:
-    def __init__(self, app, icon_path: Path, on_open=None):
+    def __init__(self, app, icon_path: Path, on_open=None, on_update=None):
         self.app = app
         self.icon_path = Path(icon_path)
         self.on_open = on_open
+        self.on_update = on_update
         self.GLib = None
         self.seen: dict[str, int] = {}
         self.test_seq = 0
@@ -239,13 +240,33 @@ class NotificationMonitor:
         target = (account_id, thread_id) if account_id and thread_id else None
         self._send_notification(title, body, prefs, target)
 
+    def notify_update(self, version: str) -> bool:
+        if not version or self.GLib is None:
+            return False
+        try:
+            from .server import _load_ui_prefs
+
+            prefs = _load_ui_prefs(self.app.store)
+        except Exception:
+            prefs = {}
+        title = f"Courier {version} is available"
+        body = f"Open Settings → Updates to download Courier {version}."
+
+        def send() -> bool:
+            self._send_notification(title, body, prefs, ("__update__", version))
+            return False
+
+        self.GLib.idle_add(send)
+        return True
+
     def _send_notification(
         self,
         title: str,
         body: str,
         prefs: dict[str, Any],
         target: tuple[str, str] | None = None,
-    ) -> None:
+    ) -> bool:
+        sent = False
         try:
             if self.notify is None:
                 import gi
@@ -267,7 +288,7 @@ class NotificationMonitor:
                     )
                 except Exception:
                     pass
-            if target and self.on_open:
+            if target and (self.on_open or self.on_update):
                 notification.add_action(
                     "default",
                     "Open",
@@ -280,9 +301,11 @@ class NotificationMonitor:
                 self.active.append(notification)
                 notification.connect("closed", self._drop_notification)
             notification.show()
+            sent = True
         except Exception as exc:
             self.app.log(f"notification failed: {exc!r}")
         self._play_sound(prefs)
+        return sent
 
     def _drop_notification(self, notification) -> None:
         self.active = [
@@ -291,15 +314,28 @@ class NotificationMonitor:
 
     def _on_default_action(self, _notification, _action, target) -> None:
         try:
-            account_id, thread_id = target
+            target_name, target_value = target
         except (TypeError, ValueError):
+            return
+        if target_name == "__update__":
+            if not self.on_update:
+                return
+
+            def invoke_update() -> bool:
+                try:
+                    self.on_update(target_value)
+                except Exception as exc:
+                    self.app.log(f"update notification open failed: {exc!r}")
+                return False
+
+            self._on_main(invoke_update)
             return
         if not self.on_open:
             return
 
         def invoke() -> bool:
             try:
-                self.on_open(account_id, thread_id)
+                self.on_open(target_name, target_value)
             except Exception as exc:
                 self.app.log(f"notification open failed: {exc!r}")
             return False

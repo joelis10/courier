@@ -1,1 +1,3 @@
 """Courier package."""
+
+APP_VERSION = "1.2.0"

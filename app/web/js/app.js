@@ -132,6 +132,8 @@ const DEFAULT_PREFS = {
   notifyAIMinChars: 400,
   aiEnabled: false,
   googleSetupSeen: false,
+  updateAuto: false,
+  updateInterval: 5,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -157,6 +159,12 @@ const state = {
     revision: 0,
   },
   settings: {},
+  version: "",
+  updateChecking: false,
+  updateResult: null,
+  updateTimer: null,
+  updateSessionChecked: false,
+  updateNotifiedVersion: "",
   oauthPending: false,
   folder: "inbox",
   labelName: null,
@@ -655,27 +663,115 @@ function isTypingTarget(target) {
 /* -------------------------------------------------------------------------- */
 
 async function api(path, options = {}) {
-  const headers = { [TOKEN_HEADER]: state.token };
-  if (options.body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, {
-    method: options.method || "GET",
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-    signal: options.signal,
-  });
-  const type = response.headers.get("content-type") || "";
-  let data = null;
-  if (type.includes("application/json")) {
-    data = await response.json();
-  } else {
-    data = await response.text();
-  }
-  if (!response.ok) {
-    const error = new Error((data && data.error) || `Request failed (${response.status})`);
-    error.status = response.status;
+  const controller = options.timeout ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), options.timeout)
+    : null;
+  try {
+    const headers = { [TOKEN_HEADER]: state.token };
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
+    const response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      signal: options.signal || (controller ? controller.signal : undefined),
+    });
+    const type = response.headers.get("content-type") || "";
+    let data = null;
+    if (type.includes("application/json")) {
+      data = await response.json();
+    } else {
+      data = await response.text();
+    }
+    if (!response.ok) {
+      const error = new Error((data && data.error) || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (controller && controller.signal.aborted) {
+      const timeout = new Error("The request timed out.");
+      timeout.status = 0;
+      timeout.timeout = true;
+      throw timeout;
+    }
     throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return data;
+}
+
+function apiXhr(path, options = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    xhr.open(options.method || "POST", path, true);
+    xhr.setRequestHeader(TOKEN_HEADER, state.token);
+    if (options.rawBody !== undefined || options.body !== undefined) {
+      xhr.setRequestHeader("Content-Type", "application/json");
+    }
+    if (options.timeout) xhr.timeout = options.timeout;
+    if (options.onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          options.onProgress(event.loaded / event.total);
+        }
+      };
+    }
+    if (options.onUploadComplete) {
+      xhr.upload.onload = () => options.onUploadComplete();
+    }
+    if (options.onStart) options.onStart(xhr);
+    xhr.onload = () => {
+      let data = null;
+      const type = xhr.getResponseHeader("content-type") || "";
+      try {
+        data = type.includes("application/json")
+          ? JSON.parse(xhr.responseText)
+          : xhr.responseText;
+      } catch (error) {
+        data = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        settled = true;
+        resolve(data);
+        return;
+      }
+      const error = new Error(
+        (data && data.error) || `Request failed (${xhr.status})`
+      );
+      error.status = xhr.status;
+      fail(error);
+    };
+    xhr.onerror = () => fail(new Error("Could not reach Courier."));
+    xhr.ontimeout = () => {
+      const error = new Error("The request timed out.");
+      error.status = 0;
+      error.timeout = true;
+      fail(error);
+    };
+    xhr.onabort = () => {
+      const error = new Error("The request was cancelled.");
+      error.status = 0;
+      error.aborted = true;
+      fail(error);
+    };
+    try {
+      xhr.send(
+        options.rawBody !== undefined
+          ? options.rawBody
+          : JSON.stringify(options.body || {})
+      );
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 function attachmentUrl(message, index, inline = false) {
@@ -1998,6 +2094,122 @@ function draftSignature(draft) {
   ]);
 }
 
+function composerDraftSignatureFromForm(composer) {
+  const form = $("#composer .composer-form");
+  const editor = $(".composer-editor", form);
+  if (!composer || !form || !editor) return "";
+  adoptDataImages(editor, composer);
+  const outgoing = composerOutgoing(editor, composer);
+  composer.html = editor.innerHTML;
+  return draftSignature({
+    to: $(".composer-to", form)?.value || "",
+    cc: $(".composer-cc", form)?.value || "",
+    bcc: $(".composer-bcc", form)?.value || "",
+    subject:
+      $(".composer-subject", form)?.value ?? composer.subject ?? "",
+    html: outgoing.html,
+    text: outgoing.text,
+    attachments: outgoing.attachments,
+    in_reply_to: composer.inReplyTo || "",
+    references: composer.references || "",
+  });
+}
+
+function primeComposerDraftBaseline(composer) {
+  if (!composer) return;
+  composer.initialSignature = composerDraftSignatureFromForm(composer);
+  if (composer.draftReady) {
+    composer.draftSignature = composer.initialSignature;
+  }
+  scheduleComposerSize(composer);
+}
+
+const COMPOSER_MIME_LIMIT = 34 * 1024 * 1024;
+
+function formatComposerSize(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(value / 1024))} KB`;
+}
+
+function estimateComposerMime(composer) {
+  const form = $("#composer .composer-form");
+  const editor = $(".composer-editor", form);
+  if (!composer || !form || !editor) {
+    return { bytes: 0, tooLarge: false };
+  }
+  adoptDataImages(editor, composer);
+  const usedInline = new Set();
+  let cidBytes = 0;
+  for (const image of editor.querySelectorAll("img")) {
+    const cid = image.dataset.courierCid || "";
+    if (cid) {
+      usedInline.add(cid);
+      cidBytes += `cid:${cid}`.length;
+    }
+  }
+  const attachmentBytes = (composer.attachments || []).reduce(
+    (sum, item) => {
+      if (item.inline && !usedInline.has(item.content_id)) return sum;
+      return sum + Math.floor((String(item.data || "").length * 3) / 4);
+    },
+    0
+  );
+  const textBytes = editor.innerText.length;
+  const markupBytes =
+    editor.querySelectorAll("*").length * 80 + textBytes * 1.05;
+  const headerBytes =
+    String($(".composer-to", form)?.value || "").length +
+    String($(".composer-cc", form)?.value || "").length +
+    String($(".composer-bcc", form)?.value || "").length +
+    String($(".composer-subject", form)?.value || composer.subject || "")
+      .length +
+    2048;
+  const bytes =
+    Math.floor(attachmentBytes * 1.33) +
+    Math.floor(markupBytes) +
+    cidBytes +
+    headerBytes;
+  return { bytes, tooLarge: bytes > COMPOSER_MIME_LIMIT };
+}
+
+function updateComposerSize(composer = state.composer) {
+  if (!composer || composer !== state.composer) return;
+  const form = $("#composer .composer-form");
+  const editor = $(".composer-editor", form);
+  const label = $(".composer-size", form);
+  if (!form || !editor || !label) return;
+  const estimate = estimateComposerMime(composer);
+  composer.mimeEstimate = estimate.bytes;
+  composer.tooLarge = estimate.tooLarge;
+  const size = formatComposerSize(estimate.bytes);
+  label.textContent = estimate.tooLarge
+    ? `Too large · ${size}`
+    : `~${size}`;
+  label.classList.toggle("over", estimate.tooLarge);
+  label.title = `Approximate encoded message size. Limit ${formatComposerSize(
+    COMPOSER_MIME_LIMIT
+  )}.`;
+  const button = $(".send-btn", form);
+  if (button && !composer.sending) {
+    button.disabled = estimate.tooLarge;
+    button.title = estimate.tooLarge
+      ? "This message is too large to send. Remove attachments or inline images."
+      : "";
+  }
+}
+
+function scheduleComposerSize(composer = state.composer) {
+  if (!composer) return;
+  if (composer.sizeTimer) clearTimeout(composer.sizeTimer);
+  composer.sizeTimer = setTimeout(() => {
+    composer.sizeTimer = null;
+    updateComposerSize(composer);
+  }, 350);
+}
+
 function adoptDataImages(editor, composer) {
   for (const image of editor.querySelectorAll("img[src^='data:image/']")) {
     if (image.dataset.courierCid) continue;
@@ -2008,7 +2220,7 @@ function adoptDataImages(editor, composer) {
 }
 
 function saveComposerDraft(composer) {
-  if (!composer || composer.sending) return;
+  if (!composer || composer.sending || composer.sent) return;
   if (composer.draftPromise) {
     composer.draftQueued = true;
     return;
@@ -2016,6 +2228,10 @@ function saveComposerDraft(composer) {
   const form = $("#composer .composer-form");
   const editor = $(".composer-editor", form);
   if (!form || !editor) return;
+  if (estimateComposerMime(composer).tooLarge) {
+    composer.draftError = true;
+    return;
+  }
   const seq = (composer.draftSeq || 0) + 1;
   composer.draftSeq = seq;
   const to = $(".composer-to", form)?.value || "";
@@ -2050,7 +2266,8 @@ function saveComposerDraft(composer) {
     }
     return;
   }
-  const request = api("/api/draft", {
+  let draftXhr = null;
+  const request = apiXhr("/api/draft", {
     method: "POST",
     body: {
       account: composer.accountId,
@@ -2058,6 +2275,11 @@ function saveComposerDraft(composer) {
       thread_id: composer.threadId || composer.draftThreadId || "",
       kind: composer.kind,
       payload: draft,
+    },
+    timeout: 300000,
+    onStart: (xhr) => {
+      draftXhr = xhr;
+      composer.draftXhr = xhr;
     },
   })
     .then((data) => {
@@ -2073,8 +2295,13 @@ function saveComposerDraft(composer) {
       clearLegacyDraft(composer);
       if (first && !composer.sending) refreshState({ quiet: true });
     })
-    .catch(() => {
+    .catch((error) => {
       if (seq !== composer.draftSeq) return;
+      if (error.aborted && composer.draftCancelled) {
+        composer.draftCancelled = false;
+        return;
+      }
+      if (composer.sending) return;
       if (!composer.draftError) {
         composer.draftError = true;
         toast("Draft could not be saved to Gmail", true, 5000);
@@ -2082,6 +2309,7 @@ function saveComposerDraft(composer) {
     });
   composer.draftPromise = request;
   request.finally(() => {
+    if (composer.draftXhr === draftXhr) composer.draftXhr = null;
     if (composer.draftPromise === request) composer.draftPromise = null;
     if (composer.draftQueued) {
       composer.draftQueued = false;
@@ -2108,6 +2336,7 @@ function deleteComposerDraft(composer) {
       thread: threadId,
       kind: composer.kind,
     },
+    timeout: 60000,
   }).catch(() => {
     toast("Draft could not be deleted", true);
   });
@@ -2142,8 +2371,8 @@ function restoreThreadDraft(thread, gmailDraft = null) {
     if (state.composer) {
       state.composer.minimized = kind !== "new";
       state.composer.draftReady = true;
-      state.composer.draftSignature = draftSignature(draft);
       renderComposer();
+      primeComposerDraftBaseline(state.composer);
     }
     return;
   }
@@ -2155,8 +2384,8 @@ function restoreThreadDraft(thread, gmailDraft = null) {
     if (state.composer) {
       state.composer.minimized = true;
       state.composer.draftReady = true;
-      state.composer.draftSignature = draftSignature(draft);
       renderComposer();
+      primeComposerDraftBaseline(state.composer);
     }
     return;
   }
@@ -2477,6 +2706,7 @@ function composerHtml(composer) {
       </div>
       <div class="composer-error"></div>
       <div class="composer-foot">
+        <span class="composer-size" id="composer-size"></span>
         <button class="btn accent send-btn" type="submit">Send</button>
       </div>
     </form>`;
@@ -2485,6 +2715,7 @@ function composerHtml(composer) {
 function renderComposer() {
   const host = $("#composer");
   const composer = state.composer;
+  clearComposerImageSelection();
   closeContactMenu();
   if (!composer) {
     host.hidden = true;
@@ -2499,6 +2730,7 @@ function renderComposer() {
   host.innerHTML = composerHtml(composer);
   host.dataset.kind = composer.kind;
   renderComposerAttachments();
+  updateComposerSize(composer);
   updateReaderPane();
   if (!composer.minimized) {
     setTimeout(() => {
@@ -2651,7 +2883,10 @@ function openComposer(kind, options = {}) {
     subject = replySubject(decodeEntities(thread.subject || message.subject));
   }
   if (draftHasContent(draft)) {
-    subject = draft.subject ?? subject;
+    // Legacy drafts and some Gmail drafts can carry an empty subject. A blank
+    // draft subject must not erase the Re:/Fwd: subject derived from the thread.
+    const draftSubject = String(draft.subject || "").trim();
+    if (draftSubject) subject = draftSubject;
     html = draft.html || html;
   }
 
@@ -2677,6 +2912,7 @@ function openComposer(kind, options = {}) {
         ? draft.attachments
         : [],
     sending: false,
+    sent: false,
     initialized: false,
     targetMessageId: message ? message.id : "",
     inReplyTo:
@@ -2706,20 +2942,10 @@ function openComposer(kind, options = {}) {
     initialSignature: "",
     error: "",
   };
-  composer.initialSignature = draftSignature({
-    to: composer.to,
-    cc: composer.cc,
-    bcc: composer.bcc,
-    subject: composer.subject,
-    html: composer.html || "",
-    text: htmlToText(composer.html || ""),
-    attachments: composer.attachments,
-    in_reply_to: composer.inReplyTo,
-    references: composer.references,
-  });
   state.composer = composer;
   if (!hasThread) mode = "full";
   renderComposer();
+  primeComposerDraftBaseline(composer);
   if (state.prefs.layout === "reading" && !hasThread) {
     updateReaderPane();
   }
@@ -2811,6 +3037,7 @@ function addComposerAttachmentPayloads(items) {
   state.composer.attachmentShelfCollapsed = false;
   renderComposerAttachments();
   scheduleDraftSave();
+  scheduleComposerSize(state.composer);
 }
 
 async function viewComposerAttachment(index) {
@@ -2857,6 +3084,35 @@ function saveComposerImageRange() {
     state.composer.imageRange = selection.getRangeAt(0).cloneRange();
   } else {
     state.composer.imageRange = null;
+  }
+}
+
+async function chooseComposerInlineImage() {
+  if (!state.composer) return;
+  saveComposerImageRange();
+  try {
+    const data = await api("/api/choose-inline-image", {
+      method: "POST",
+      body: {},
+    });
+    const file = data && data.file;
+    if (!file || !file.data) return;
+    const binary = atob(file.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    insertComposerInlineImage(
+      new File([bytes], file.filename || "inline-image", {
+        type: file.mime || "image/png",
+      })
+    );
+  } catch (error) {
+    if (error.status === 503) {
+      $("#composer .composer-inline-image")?.click();
+      return;
+    }
+    toast(error.message || "Could not choose an image", true);
   }
 }
 
@@ -2925,6 +3181,7 @@ function adoptPastedImages(editor) {
   }
   if (state.composer) state.composer.html = editor.innerHTML;
   scheduleDraftSave();
+  scheduleComposerSize(state.composer);
 }
 
 function insertComposerInlineImage(file) {
@@ -2980,12 +3237,352 @@ function insertComposerInlineImage(file) {
       state.composer.html = editor.innerHTML;
       renderComposerAttachments();
       scheduleDraftSave();
+      selectComposerImage(image);
+      scheduleComposerSize(state.composer);
     } catch (error) {
       toast("Could not insert the image", true);
     }
   };
   reader.onerror = () => toast("Could not read the image", true);
   reader.readAsDataURL(file);
+}
+
+function composerImageWidth(image) {
+  return image && image.isConnected
+    ? Math.round(image.getBoundingClientRect().width)
+    : 0;
+}
+
+let composerImageResizeActive = false;
+let composerImageClickGuard = 0;
+
+function ensureComposerImageTools() {
+  const wrap = $("#composer .editor-wrap");
+  if (!wrap) return null;
+  let tools = $(".composer-image-tools", wrap);
+  if (tools) return tools;
+  tools = document.createElement("div");
+  tools.className = "composer-image-tools";
+  tools.hidden = true;
+  tools.innerHTML = `
+    <button type="button" class="composer-image-handle" data-corner="nw" aria-label="Resize image from top left" title="Resize"></button>
+    <button type="button" class="composer-image-handle" data-corner="ne" aria-label="Resize image from top right" title="Resize"></button>
+    <button type="button" class="composer-image-handle" data-corner="sw" aria-label="Resize image from bottom left" title="Resize"></button>
+    <button type="button" class="composer-image-handle" data-corner="se" aria-label="Resize image from bottom right" title="Resize"></button>
+    <div class="composer-image-actions" role="group" aria-label="Image size">
+      <button type="button" class="composer-image-action" data-image-size="small">Small</button>
+      <button type="button" class="composer-image-action" data-image-size="original">Original Size</button>
+    </div>`;
+  wrap.appendChild(tools);
+  tools.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest?.(".composer-image-handle");
+    if (!handle) return;
+    startComposerImageResize(event, handle.dataset.corner || "se");
+  });
+  tools.addEventListener("click", (event) => {
+    const button = event.target.closest?.(".composer-image-action");
+    if (!button || !state.composer || !state.composer.selectedImage) return;
+    event.preventDefault();
+    const image = state.composer.selectedImage;
+    const natural = image.naturalWidth || composerImageWidth(image);
+    const target =
+      button.dataset.imageSize === "original"
+        ? natural
+        : Math.min(200, natural || 200);
+    setComposerImageWidth(image, target);
+  });
+  wrap.addEventListener(
+    "scroll",
+    () => {
+      if (state.composer && state.composer.selectedImage) {
+        positionComposerImageTools();
+      }
+    },
+    { passive: true }
+  );
+  return tools;
+}
+
+function positionComposerImageTools() {
+  const composer = state.composer;
+  const image = composer && composer.selectedImage;
+  const wrap = $("#composer .editor-wrap");
+  const tools = $("#composer .composer-image-tools");
+  if (!composer || !image || !image.isConnected || !wrap || !tools) {
+    if (tools) tools.hidden = true;
+    if (composer) composer.selectedImage = null;
+    const editor = $("#composer .composer-editor");
+    if (editor) editor.classList.remove("has-image-tools");
+    return;
+  }
+  const wrapRect = wrap.getBoundingClientRect();
+  const rect = image.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) {
+    tools.hidden = true;
+    const editor = $("#composer .composer-editor");
+    if (editor) editor.classList.remove("has-image-tools");
+    return;
+  }
+  tools.hidden = false;
+  tools.style.left = `${rect.left - wrapRect.left + wrap.scrollLeft}px`;
+  tools.style.top = `${rect.top - wrapRect.top + wrap.scrollTop}px`;
+  tools.style.width = `${rect.width}px`;
+  tools.style.height = `${rect.height}px`;
+  const actions = $(".composer-image-actions", tools);
+  if (actions) {
+    const actionWidth = actions.offsetWidth || 0;
+    if (rect.left + actionWidth > wrapRect.right - 6) {
+      actions.style.left = "auto";
+      actions.style.right = "0";
+    } else {
+      actions.style.left = "0";
+      actions.style.right = "auto";
+    }
+  }
+  const editor = $("#composer .composer-editor");
+  if (editor) editor.classList.add("has-image-tools");
+}
+
+function revealComposerImageTools() {
+  const wrap = $("#composer .editor-wrap");
+  const image = state.composer && state.composer.selectedImage;
+  const tools = $("#composer .composer-image-tools");
+  if (!wrap || !image || !tools || tools.hidden) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const imageRect = image.getBoundingClientRect();
+  const actions = $(".composer-image-actions", tools);
+  const actionRect = actions ? actions.getBoundingClientRect() : imageRect;
+  const top = Math.min(imageRect.top, actionRect.top);
+  const bottom = Math.max(imageRect.bottom, actionRect.bottom);
+  if (imageRect.height >= wrapRect.height - 20) {
+    wrap.scrollTop += Math.max(0, bottom - wrapRect.bottom + 4);
+    return;
+  }
+  if (bottom > wrapRect.bottom - 4) {
+    wrap.scrollTop += bottom - wrapRect.bottom + 4;
+  }
+  if (top < wrapRect.top + 4) {
+    wrap.scrollTop -= wrapRect.top + 4 - top;
+  }
+}
+
+function selectComposerImage(image) {
+  const composer = state.composer;
+  const editor = $("#composer .composer-editor");
+  if (!composer || !editor || !image || !editor.contains(image)) return;
+  composer.selectedImage = image;
+  adoptDataImages(editor, composer);
+  ensureComposerImageTools();
+  positionComposerImageTools();
+  window.requestAnimationFrame(() => {
+    if (state.composer && state.composer.selectedImage === image) {
+      positionComposerImageTools();
+      revealComposerImageTools();
+    }
+  });
+  captureComposerFields();
+  scheduleDraftSave();
+  scheduleComposerSize(composer);
+  if (!image.complete) {
+    image.addEventListener("load", positionComposerImageTools, { once: true });
+  }
+}
+
+function clearComposerImageSelection() {
+  if (state.composer) state.composer.selectedImage = null;
+  const tools = $("#composer .composer-image-tools");
+  if (tools) tools.hidden = true;
+  const editor = $("#composer .composer-editor");
+  if (editor) editor.classList.remove("has-image-tools");
+}
+
+function setComposerImageWidth(image, width, reveal = true) {
+  if (!image || !image.isConnected) return;
+  const naturalWidth = image.naturalWidth || 0;
+  const naturalHeight = image.naturalHeight || 0;
+  const floor = Math.min(24, naturalWidth || 24);
+  let target = Math.max(floor, Math.round(Number(width) || 0));
+  if (naturalWidth) target = Math.min(target, naturalWidth);
+  image.style.width = `${target}px`;
+  image.style.height = "auto";
+  image.style.maxWidth = "100%";
+  image.setAttribute("width", String(target));
+  if (naturalWidth && naturalHeight) {
+    image.setAttribute(
+      "height",
+      String(Math.max(1, Math.round((target * naturalHeight) / naturalWidth)))
+    );
+  } else {
+    image.removeAttribute("height");
+  }
+  positionComposerImageTools();
+  if (reveal) {
+    window.requestAnimationFrame(() => {
+      if (state.composer && state.composer.selectedImage === image) {
+        positionComposerImageTools();
+        revealComposerImageTools();
+      }
+    });
+  }
+  captureComposerFields();
+  scheduleDraftSave();
+  scheduleComposerSize(state.composer);
+}
+
+function composerContextImage() {
+  const composer = state.composer;
+  const image = composer && composer.contextImage;
+  const editor = $("#composer .composer-editor");
+  if (!composer || !image || !image.isConnected || !editor) return null;
+  return editor.contains(image) ? image : null;
+}
+
+function openComposerImageContextMenu(image, x, y) {
+  if (!state.composer || !image || !image.isConnected) return;
+  selectComposerImage(image);
+  state.composer.contextImage = image;
+  openMenuAt(x, y, [
+    { label: "Small", action: "composer-image-small", icon: "minimize" },
+    {
+      label: "Original Size",
+      action: "composer-image-original",
+      icon: "maximize",
+    },
+    {
+      label: "Convert to attachment",
+      action: "composer-image-attach",
+      icon: "paperclip",
+    },
+    { label: "Delete image", action: "composer-image-delete", icon: "trash" },
+  ]);
+}
+
+function resizeComposerContextImage(preset) {
+  const image = composerContextImage();
+  if (!image) return;
+  const natural = image.naturalWidth || composerImageWidth(image);
+  const target =
+    preset === "original" ? natural : Math.min(200, natural || 200);
+  setComposerImageWidth(image, target);
+  selectComposerImage(image);
+}
+
+function deleteComposerImage(image = composerContextImage()) {
+  const composer = state.composer;
+  if (!composer || !image) return;
+  const cid = image.dataset.courierCid || "";
+  if (cid) {
+    composer.attachments = (composer.attachments || []).filter(
+      (item) => !(item.inline && item.content_id === cid)
+    );
+  }
+  if (composer.selectedImage === image) clearComposerImageSelection();
+  image.remove();
+  composer.contextImage = null;
+  captureComposerFields();
+  renderComposerAttachments();
+  scheduleDraftSave();
+  scheduleComposerSize(composer);
+}
+
+function convertComposerImageToAttachment(image = composerContextImage()) {
+  const composer = state.composer;
+  const editor = $("#composer .composer-editor");
+  if (!composer || !image || !editor || !editor.contains(image)) return;
+  adoptDataImages(editor, composer);
+  const cid = image.dataset.courierCid || "";
+  const items = composer.attachments || [];
+  const index = items.findIndex(
+    (item) => item.inline && item.content_id === cid
+  );
+  if (index < 0) {
+    toast("Could not convert this image", true);
+    return;
+  }
+  const item = items[index];
+  items.splice(index, 1);
+  items.push({
+    filename: item.filename || image.alt || "image",
+    mime: item.mime || "image/png",
+    size: Number(item.size) || Math.floor((String(item.data || "").length * 3) / 4),
+    data: item.data || "",
+    inline: false,
+    content_id: "",
+  });
+  if (composer.selectedImage === image) clearComposerImageSelection();
+  image.remove();
+  composer.contextImage = null;
+  composer.attachmentShelfCollapsed = false;
+  captureComposerFields();
+  renderComposerAttachments();
+  scheduleDraftSave();
+  scheduleComposerSize(composer);
+  toast("Image moved to attachments");
+}
+
+function startComposerImageResize(event, corner) {  const image = state.composer && state.composer.selectedImage;
+  if (!image || !image.isConnected) return;
+  const editor = $("#composer .composer-editor");
+  const startX = event.clientX;
+  const startWidth = image.getBoundingClientRect().width;
+  if (!startWidth) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const naturalWidth = image.naturalWidth || startWidth;
+  const available = editor
+    ? Math.max(24, editor.clientWidth - 28)
+    : naturalWidth;
+  const maxWidth = Math.max(
+    startWidth,
+    Math.min(naturalWidth, available)
+  );
+  const handleElement =
+    event.target.closest?.(".composer-image-handle") || null;
+  let hintShown = false;
+  let currentWidth = startWidth;
+  composerImageResizeActive = true;
+  document.body.classList.add("composer-image-resizing");
+  const move = (moveEvent) => {
+    if (!image.isConnected) return;
+    const delta = moveEvent.clientX - startX;
+    const signed = corner.endsWith("w") ? -delta : delta;
+    const wanted = startWidth + signed;
+    if (wanted <= naturalWidth + 0.5) hintShown = false;
+    if (
+      naturalWidth &&
+      wanted > naturalWidth + 0.5 &&
+      maxWidth >= naturalWidth - 0.5 &&
+      !hintShown
+    ) {
+      const anchor = handleElement
+        ? handleElement.getBoundingClientRect()
+        : null;
+      showCursorHint(
+        "Already at original size",
+        anchor ? anchor.right + 10 : moveEvent.clientX + 12,
+        anchor ? anchor.top + anchor.height / 2 : moveEvent.clientY
+      );
+      hintShown = true;
+    }
+    const next = Math.max(24, Math.min(wanted, maxWidth));
+    if (Math.abs(next - currentWidth) < 0.5) return;
+    currentWidth = next;
+    setComposerImageWidth(image, next, false);
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    window.removeEventListener("blur", finish);
+    composerImageResizeActive = false;
+    composerImageClickGuard = Date.now() + 300;
+    document.body.classList.remove("composer-image-resizing");
+    if (image.isConnected) setComposerImageWidth(image, currentWidth);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+  window.addEventListener("pointercancel", finish, { once: true });
+  window.addEventListener("blur", finish);
 }
 
 function imageToDataUrl(image) {
@@ -3056,6 +3653,7 @@ async function prepareComposerImages(editor, options = {}) {
     }
   }
   if (state.composer) state.composer.html = editor.innerHTML;
+  scheduleComposerSize(state.composer);
   if (failed && options.announce) {
     toast("Could not read a pasted image", true);
   }
@@ -3087,7 +3685,18 @@ async function sendComposer() {
   const form = $("#composer .composer-form");
   const editor = $(".composer-editor", form);
   if (!form || !editor) return;
+  const earlyEstimate = estimateComposerMime(composer);
+  if (earlyEstimate.tooLarge) {
+    composer.error =
+      "This message is too large to send. Remove some attachments or inline images.";
+    const earlyError = $(".composer-error", form);
+    if (earlyError) earlyError.textContent = composer.error;
+    toast(composer.error, true);
+    updateComposerSize(composer);
+    return;
+  }
   await prepareComposerImages(editor, { announce: true });
+  adoptDataImages(editor, composer);
   const outgoing = composerOutgoing(editor, composer);
   const errorHost = $(".composer-error", form);
   const button = $(".send-btn", form);
@@ -3148,39 +3757,160 @@ async function sendComposer() {
     });
     if (!proceed) return;
   }
+  const attachmentBytes = (outgoing.attachments || []).reduce(
+    (total, item) =>
+      total + Math.floor((String(item.data || "").length * 3) / 4),
+    0
+  );
+  if (attachmentBytes > 34 * 1024 * 1024) {
+    composer.error =
+      "Attachments and inline images are larger than 34 MB.";
+    if (errorHost) errorHost.textContent = composer.error;
+    const sizeLabel = $(".composer-size", form);
+    if (sizeLabel) {
+      sizeLabel.textContent = `Too large · ${formatComposerSize(
+        attachmentBytes
+      )}`;
+      sizeLabel.classList.add("over");
+    }
+    if (button) {
+      button.disabled = true;
+      button.title = composer.error;
+    }
+    toast(composer.error, true);
+    return;
+  }
+  const estimatedMimeBytes =
+    Math.floor(attachmentBytes * 1.34) +
+    String(outgoing.html || "").length +
+    String(outgoing.text || "").length;
+  if (estimatedMimeBytes > 34 * 1024 * 1024) {
+    composer.error =
+      "Attachments and inline images are too large to send.";
+    if (errorHost) errorHost.textContent = composer.error;
+    const sizeLabel = $(".composer-size", form);
+    if (sizeLabel) {
+      sizeLabel.textContent = `Too large · ${formatComposerSize(
+        estimatedMimeBytes
+      )}`;
+      sizeLabel.classList.add("over");
+    }
+    if (button) {
+      button.disabled = true;
+      button.title = composer.error;
+    }
+    toast(composer.error, true);
+    return;
+  }
+  const draftWasPending = Boolean(composer.draftPromise || composer.draftXhr);
+  const sendBody = {
+    account: composer.accountId,
+    to: toValue,
+    cc: ccValue,
+    bcc: bccValue,
+    subject: subjectValue,
+    text: outgoing.text || htmlToText(outgoing.html),
+    html: outgoing.html,
+    attachments: outgoing.attachments,
+    thread_id: composer.threadId || composer.draftThreadId || null,
+    draft_id: composer.draftId || "",
+    draft_thread_id: composer.draftThreadId || "",
+    draft_pending: draftWasPending,
+    in_reply_to: composer.inReplyTo,
+    references: composer.references,
+  };
+  let serializedSendBody = "";
+  let sendBytes = 0;
+  try {
+    serializedSendBody = JSON.stringify(sendBody);
+    sendBytes = new Blob([serializedSendBody]).size;
+  } catch (error) {
+    serializedSendBody = JSON.stringify(sendBody);
+    sendBytes = serializedSendBody.length;
+  }
+  if (sendBytes > 48 * 1024 * 1024) {
+    composer.error =
+      "This message is too large to send. Remove some attachments or inline images.";
+    if (errorHost) errorHost.textContent = composer.error;
+    const sizeLabel = $(".composer-size", form);
+    if (sizeLabel) {
+      sizeLabel.textContent = `Too large · ${formatComposerSize(sendBytes)}`;
+      sizeLabel.classList.add("over");
+    }
+    if (button) {
+      button.disabled = true;
+      button.title = composer.error;
+    }
+    toast(composer.error, true);
+    return;
+  }
+  if (draftWasPending) {
+    composer.draftCancelled = true;
+    if (composer.draftXhr) {
+      try {
+        composer.draftXhr.abort();
+      } catch (error) {
+        /* The request may have already finished. */
+      }
+    }
+  }
   composer.sending = true;
   if (errorHost) errorHost.textContent = "";
   updateSendStatus("Sending message", { spinner: true, closable: false });
+  setSendStatusText("Sending message · 0%");
+  const startedSend = Date.now();
+  let sendPercent = 0;
+  let uploadDone = false;
+  let gmailStarted = 0;
+  const refreshSendProgress = () => {
+    if (!composer.sending) return;
+    if (!uploadDone) {
+      if (sendPercent > 0) {
+        setSendStatusText(`Sending message · ${sendPercent}%`);
+      } else {
+        const seconds = Math.max(
+          0,
+          Math.round((Date.now() - startedSend) / 1000)
+        );
+        setSendStatusText(`Sending message… ${seconds}s`);
+      }
+      return;
+    }
+    const seconds = Math.max(
+      0,
+      Math.round((Date.now() - (gmailStarted || startedSend)) / 1000)
+    );
+    setSendStatusText(`Uploading to Gmail… ${seconds}s`);
+  };
+  stopSendProgress();
+  state.sendProgressTimer = setInterval(refreshSendProgress, 1000);
   if (button) {
     button.disabled = true;
     button.innerHTML = `<span class="spinner"></span>Sending`;
   }
-  if (composer.draftPromise) {
-    try {
-      await composer.draftPromise;
-    } catch (error) {
-      /* Draft failures were already reported. */
-    }
-  }
   try {
-    const result = await api("/api/send", {
+    const result = await apiXhr("/api/send", {
       method: "POST",
-      body: {
-        account: composer.accountId,
-        to: toValue,
-        cc: ccValue,
-        bcc: bccValue,
-        subject: subjectValue,
-        text: outgoing.text || htmlToText(outgoing.html),
-        html: outgoing.html,
-        attachments: outgoing.attachments,
-        thread_id: composer.threadId || composer.draftThreadId || null,
-        draft_id: composer.draftId || "",
-        draft_thread_id: composer.draftThreadId || "",
-        in_reply_to: composer.inReplyTo,
-        references: composer.references,
+      rawBody: serializedSendBody,
+      timeout: 300000,
+      onProgress: (fraction) => {
+        sendPercent = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+        if (fraction >= 0.999 && !uploadDone) {
+          uploadDone = true;
+          gmailStarted = Date.now();
+        }
+        refreshSendProgress();
+      },
+      onUploadComplete: () => {
+        uploadDone = true;
+        sendPercent = 100;
+        gmailStarted = Date.now();
+        refreshSendProgress();
       },
     });
+    stopSendProgress();
+    composer.sending = false;
+    composer.sent = true;
     const threadId = composer.threadId || composer.draftThreadId || "";
     const accountId = composer.accountId;
     clearLegacyDraft(composer);
@@ -3193,13 +3923,17 @@ async function sendComposer() {
     }
     void result;
   } catch (error) {
+    stopSendProgress();
     composer.sending = false;
-    composer.error = error.message || "Message could not be sent.";
+    composer.error = error.timeout
+      ? "Sending took too long. Check Gmail before retrying."
+      : error.message || "Message could not be sent.";
     if (errorHost) errorHost.textContent = composer.error;
     if (button) {
       button.disabled = false;
       button.textContent = "Send";
     }
+    updateComposerSize(composer);
     updateSendStatus(composer.error, { error: true, duration: 8000 });
     toast(composer.error, true);
   }
@@ -3485,6 +4219,108 @@ function aiStatusHtml() {
     return `<span class="settings-status ${cls}" id="ai-status" aria-live="polite">${state.aiStatus.html}</span>`;
   }
   return `<span class="settings-status" id="ai-status" aria-live="polite"></span>`;
+}
+
+function updateStatusContent() {
+  if (state.updateChecking) return "Checking GitHub…";
+  const result = state.updateResult;
+  if (!result) return "Not checked yet.";
+  if (result.error) return esc(result.error);
+  const latest = String(result.latest || "").replace(/^v/i, "");
+  if (result.newer) {
+    const link = result.url
+      ? ` <button type="button" class="link-btn" data-action="update-open">View release</button>`
+      : "";
+    return `Courier ${esc(latest)} is available.${link}`;
+  }
+  return `Courier is up to date${latest ? ` (${esc(latest)})` : ""}.`;
+}
+
+function updateStatusHtml() {
+  const error = Boolean(state.updateResult && state.updateResult.error);
+  return `<span class="settings-status ${
+    error ? "error" : ""
+  }" id="update-status" aria-live="polite">${updateStatusContent()}</span>`;
+}
+
+function refreshUpdateStatus() {
+  const host = $("#update-status");
+  if (host) {
+    const error = Boolean(state.updateResult && state.updateResult.error);
+    host.classList.toggle("error", error);
+    host.innerHTML = updateStatusContent();
+  }
+  const button = $("#update-check-btn");
+  if (button) {
+    button.disabled = state.updateChecking;
+    button.textContent = state.updateChecking
+      ? "Checking…"
+      : "Check GitHub for updates";
+  }
+}
+
+async function checkForUpdates(options = {}) {
+  if (state.updateChecking) return null;
+  state.updateChecking = true;
+  refreshUpdateStatus();
+  let data = null;
+  try {
+    data = await api("/api/update/check", {
+      method: "POST",
+      body: {},
+      timeout: 30000,
+    });
+    state.updateResult = data;
+    const latest = String(data.latest || "").replace(/^v/i, "");
+    if (data.newer) {
+      const alreadyNotified = data.notified_version === latest;
+      if (
+        !options.quiet ||
+        (!data.notification_sent &&
+          !alreadyNotified &&
+          state.updateNotifiedVersion !== latest)
+      ) {
+        toast(`Courier ${latest} is available`, false, 7000);
+      }
+      state.updateNotifiedVersion = latest;
+    } else if (!options.quiet) {
+      toast("Courier is up to date");
+    }
+  } catch (error) {
+    state.updateResult = {
+      error: error.message || "Could not check for updates.",
+    };
+    if (!options.quiet) {
+      toast(state.updateResult.error, true);
+    }
+  } finally {
+    state.updateChecking = false;
+    refreshUpdateStatus();
+  }
+  if (!options.quiet && state.prefs.updateAuto) {
+    state.updateSessionChecked = true;
+    scheduleUpdateCheck();
+  }
+  return data;
+}
+
+function scheduleUpdateCheck() {
+  if (state.updateTimer) {
+    clearTimeout(state.updateTimer);
+    state.updateTimer = null;
+  }
+  if (!state.prefs.updateAuto) return;
+  const value = Number(state.prefs.updateInterval);
+  const hours = [1, 5, 8].includes(value) ? value : 5;
+  const delay = state.updateSessionChecked
+    ? hours * 60 * 60 * 1000
+    : 15000;
+  state.updateTimer = setTimeout(async () => {
+    state.updateTimer = null;
+    state.updateSessionChecked = true;
+    await checkForUpdates({ quiet: true });
+    scheduleUpdateCheck();
+  }, delay);
 }
 
 function updateNotificationSoundUi() {
@@ -4142,6 +4978,53 @@ function renderSettings() {
       </div>
     </section>
 
+    <section class="settings-section" data-section="updates">
+      <h2>Updates</h2>
+      <div class="settings-group">
+        <div class="pref-row">
+          <div class="pref-row-label">Check automatically</div>
+          <label class="switch"><input type="checkbox" data-pref="updateAuto" aria-label="Check for updates automatically" ${
+            state.prefs.updateAuto ? "checked" : ""
+          }><span class="switch-track"><span class="switch-knob"></span></span></label>
+        </div>
+        <p class="settings-note">${
+          state.prefs.updateAuto
+            ? `Courier checks GitHub for new releases every ${
+                Number(state.prefs.updateInterval) === 1
+                  ? "hour"
+                  : `${Number(state.prefs.updateInterval) || 5} hours`
+              }.`
+            : "Courier will check GitHub for new releases periodically if this is on. Automatic checks are off by default."
+        }</p>
+        ${
+          state.prefs.updateAuto
+            ? `<div class="pref-row" id="update-interval-row">
+                <div class="pref-row-label">Check every</div>
+                ${choiceGroup(
+                  "update-interval",
+                  "hours",
+                  String(state.prefs.updateInterval || 5),
+                  [
+                    { value: "1", label: "1 hour" },
+                    { value: "5", label: "5 hours" },
+                    { value: "8", label: "8 hours" },
+                  ]
+                )}
+              </div>`
+            : ""
+        }
+        <div class="settings-actions">
+          <button class="btn" id="update-check-btn" data-action="update-check" ${
+            state.updateChecking ? "disabled" : ""
+          }>${state.updateChecking ? "Checking…" : "Check GitHub for updates"}</button>
+          ${updateStatusHtml()}
+        </div>
+        <p class="settings-note">${
+          state.version ? `Courier ${esc(state.version)}. ` : ""
+        }Updates are checked against github.com/joelis10/courier.</p>
+      </div>
+    </section>
+
     <section class="settings-section" data-section="notifications">
       <h2>Notifications</h2>
       <div class="settings-group">
@@ -4325,7 +5208,9 @@ function renderSettings() {
       const input =
         state.settingsFocus === "ai"
           ? $("#ai-base-url", pane) || $("#ai-enabled-toggle", pane)
-          : $('[data-action="google-setup-open"]', pane);
+          : state.settingsFocus === "updates"
+            ? $("#update-check-btn", pane)
+            : $('[data-action="google-setup-open"]', pane);
       if (input) setTimeout(() => input.focus({ preventScroll: true }), 20);
     }
     state.settingsFocus = null;
@@ -4639,10 +5524,12 @@ async function refreshState(options = {}) {
   }
   state.sync = data.sync || state.sync;
   state.settings = data.settings || state.settings;
+  state.version = data.version || state.version;
   if (!state.prefsLoaded && data.prefs && typeof data.prefs === "object") {
     state.prefs = Object.assign({}, DEFAULT_PREFS, data.prefs);
     state.prefsLoaded = true;
     applyPrefs(false);
+    scheduleUpdateCheck();
   }
   state.oauthPending = Boolean(data.oauth_pending);
   const accountSig = state.accounts
@@ -5058,6 +5945,16 @@ async function openThread(accountId, threadId, options = {}) {
   } catch (error) {
     if (seq !== state.openSeq) return;
     state.readerLoading = false;
+    if (error.status === 404) {
+      state.threads = state.threads.filter((thread) => thread.key !== key);
+      if (state.selectedKey === key) clearSelection();
+      renderReader();
+      renderList();
+      toast(error.message || "This thread is no longer available", true);
+      void refreshState({ quiet: true });
+      void loadThreads({ quiet: true });
+      return;
+    }
     if (previous) {
       state.selected = previous;
       state.expanded = previousExpanded;
@@ -5609,17 +6506,76 @@ function renderLightbox() {
     );
     if (image.complete) applyLightboxZoom();
   }
+  const canvas = $(".lightbox-canvas", root);
+  if (canvas) {
+    canvas.addEventListener("wheel", handleLightboxWheel, { passive: false });
+  }
+}
+
+function handleLightboxWheel(event) {
+  const lightbox = state.lightbox;
+  const canvas = $(".lightbox-canvas");
+  const image = $(".lightbox-image");
+  if (!lightbox || !canvas || !image) return;
+  const delta = event.deltaY || event.deltaX || 0;
+  if (!delta) return;
+  event.preventDefault();
+  const before = image.getBoundingClientRect();
+  const pointX = before.width ? (event.clientX - before.left) / before.width : 0.5;
+  const pointY = before.height ? (event.clientY - before.top) / before.height : 0.5;
+  const next = Math.max(1, Math.min(4, lightbox.zoom + (delta < 0 ? 0.25 : -0.25)));
+  if (Math.abs(next - lightbox.zoom) < 0.001) return;
+  setLightboxZoom(next);
+  if (next <= 1) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  canvas.scrollLeft = 0;
+  canvas.scrollTop = 0;
+  image.style.transform = "";
+  const zoomed = image.getBoundingClientRect();
+  const fitsX = zoomed.width <= canvas.clientWidth;
+  const fitsY = zoomed.height <= canvas.clientHeight;
+  let dx = 0;
+  let dy = 0;
+  if (fitsX) {
+    dx = event.clientX - pointX * zoomed.width - zoomed.left;
+    const minDx = canvasRect.left - zoomed.left;
+    const maxDx = canvasRect.right - zoomed.right;
+    dx = Math.max(minDx, Math.min(dx, maxDx));
+  } else {
+    canvas.scrollLeft =
+      zoomed.left -
+      canvasRect.left +
+      pointX * zoomed.width -
+      (event.clientX - canvasRect.left);
+  }
+  if (fitsY) {
+    dy = event.clientY - pointY * zoomed.height - zoomed.top;
+    const minDy = canvasRect.top - zoomed.top;
+    const maxDy = canvasRect.bottom - zoomed.bottom;
+    dy = Math.max(minDy, Math.min(dy, maxDy));
+  } else {
+    canvas.scrollTop =
+      zoomed.top -
+      canvasRect.top +
+      pointY * zoomed.height -
+      (event.clientY - canvasRect.top);
+  }
+  if (dx || dy) {
+    image.style.transform = `translate(${dx}px, ${dy}px)`;
+  }
 }
 
 function applyLightboxZoom() {
   const lightbox = state.lightbox;
   const image = $(".lightbox-image");
   if (!lightbox || !image) return;
+  image.style.transform = "";
   if (lightbox.zoom <= 1) {
     image.style.maxWidth = "";
     image.style.maxHeight = "";
     image.style.width = "";
     image.style.height = "";
+    image.style.cursor = "zoom-in";
     return;
   }
   const base = image.naturalWidth || 0;
@@ -5628,14 +6584,20 @@ function applyLightboxZoom() {
   image.style.maxHeight = "none";
   image.style.width = `${Math.round(base * lightbox.zoom)}px`;
   image.style.height = "auto";
+  image.style.cursor = "zoom-out";
 }
 
 function setLightboxZoom(value) {
   if (!state.lightbox) return;
-  const zoom = Math.max(1, Math.min(4, Math.round(Number(value) * 2) / 2));
+  const zoom = Math.max(1, Math.min(4, Math.round(Number(value) * 20) / 20));
   state.lightbox.zoom = zoom;
   const label = $(".lightbox-zoom-label");
   if (label) label.textContent = `${Math.round(zoom * 100)}%`;
+  const canvas = $(".lightbox-canvas");
+  if (canvas) {
+    canvas.scrollLeft = 0;
+    canvas.scrollTop = 0;
+  }
   applyLightboxZoom();
 }
 
@@ -5653,7 +6615,20 @@ function stepLightbox(delta) {
   setLightboxIndex(state.lightbox.index + delta);
 }
 
+function setSendStatusText(text) {
+  const node = $(".send-status-text");
+  if (node) node.textContent = text;
+}
+
+function stopSendProgress() {
+  if (state.sendProgressTimer) {
+    clearInterval(state.sendProgressTimer);
+    state.sendProgressTimer = null;
+  }
+}
+
 function updateSendStatus(message, options = {}) {
+  stopSendProgress();
   const root = $("#send-status");
   if (!root) return;
   if (state.sendStatusTimer) {
@@ -5686,6 +6661,7 @@ function updateSendStatus(message, options = {}) {
 }
 
 function dismissSendStatus() {
+  stopSendProgress();
   const root = $("#send-status");
   if (root) {
     root.hidden = true;
@@ -5695,6 +6671,35 @@ function dismissSendStatus() {
     clearTimeout(state.sendStatusTimer);
     state.sendStatusTimer = null;
   }
+}
+
+let cursorHintTimer = null;
+
+function showCursorHint(message, x, y) {
+  let hint = $("#cursor-hint");
+  if (!hint) {
+    hint = document.createElement("div");
+    hint.id = "cursor-hint";
+    hint.className = "cursor-hint";
+    document.body.appendChild(hint);
+  }
+  hint.textContent = message;
+  const width = hint.offsetWidth || 0;
+  const height = hint.offsetHeight || 0;
+  hint.style.left = `${Math.max(
+    6,
+    Math.min(x, window.innerWidth - width - 6)
+  )}px`;
+  hint.style.top = `${Math.max(
+    height / 2 + 6,
+    Math.min(y, window.innerHeight - height / 2 - 6)
+  )}px`;
+  hint.classList.add("visible");
+  if (cursorHintTimer) clearTimeout(cursorHintTimer);
+  cursorHintTimer = setTimeout(() => {
+    hint.classList.remove("visible");
+    cursorHintTimer = null;
+  }, 1400);
 }
 
 function toast(message, error = false, duration = 3600) {
@@ -6611,6 +7616,7 @@ function removeComposerAttachment(index) {
   state.composer.attachments.splice(index, 1);
   renderComposerAttachments();
   scheduleDraftSave();
+  scheduleComposerSize(state.composer);
 }
 
 function setComposerMode(mode) {
@@ -7159,6 +8165,28 @@ async function handleAction(element, event) {
       savePrefs();
       syncChoiceGroup("login-startup", "mode", state.prefs.loginStartup);
       return;
+    case "update-interval":
+      state.prefs.updateInterval = Number(element.dataset.hours) || 5;
+      savePrefs();
+      syncChoiceGroup(
+        "update-interval",
+        "hours",
+        String(state.prefs.updateInterval)
+      );
+      scheduleUpdateCheck();
+      return;
+    case "update-check":
+      await checkForUpdates();
+      return;
+    case "update-open":
+      if (state.updateResult && state.updateResult.url) {
+        try {
+          window.open(state.updateResult.url, "_blank", "noopener");
+        } catch (error) {
+          /* The release link is also shown in the update status. */
+        }
+      }
+      return;
     case "notify-upload":
       $("#notification-sound-file")?.click();
       return;
@@ -7205,9 +8233,20 @@ async function handleAction(element, event) {
     case "composer-cc":
       toggleCcBcc();
       return;
+    case "composer-image-small":
+      resizeComposerContextImage("small");
+      return;
+    case "composer-image-original":
+      resizeComposerContextImage("original");
+      return;
+    case "composer-image-attach":
+      convertComposerImageToAttachment();
+      return;
+    case "composer-image-delete":
+      deleteComposerImage();
+      return;
     case "composer-inline-image":
-      saveComposerImageRange();
-      $("#composer .composer-inline-image")?.click();
+      await chooseComposerInlineImage();
       return;
     case "toggle-composer-attachments":
       if (!state.composer) return;
@@ -7376,6 +8415,16 @@ function bindEvents() {
       event.preventDefault();
       openThreadContextMenu(
         threadFromElement(row),
+        event.clientX,
+        event.clientY
+      );
+      return;
+    }
+    const composerImage = target.closest?.(".composer-editor img");
+    if (composerImage) {
+      event.preventDefault();
+      openComposerImageContextMenu(
+        composerImage,
         event.clientX,
         event.clientY
       );
@@ -7613,6 +8662,13 @@ function bindEvents() {
       savePrefs();
       return;
     }
+    if (target.matches("input[data-pref='updateAuto']")) {
+      state.prefs.updateAuto = target.checked;
+      savePrefs();
+      scheduleUpdateCheck();
+      renderSettings();
+      return;
+    }
     if (target.matches("input[data-pref='aiEnabled']")) {
       if (target.checked) {
         target.checked = false;
@@ -7666,6 +8722,38 @@ function bindEvents() {
   });
 
   const composer = $("#composer");
+  composer.addEventListener("click", (event) => {
+    if (Date.now() < composerImageClickGuard) {
+      event.preventDefault();
+      return;
+    }
+    if (event.target.closest?.(".composer-image-tools")) return;
+    const image = event.target.closest?.(".composer-editor img");
+    if (!image) {
+      if (state.composer && state.composer.selectedImage) {
+        clearComposerImageSelection();
+      }
+      return;
+    }
+    event.preventDefault();
+    selectComposerImage(image);
+  });
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (composerImageResizeActive || Date.now() < composerImageClickGuard) return;
+      if (!state.composer || !state.composer.selectedImage) return;
+      if (event.target.closest?.(".composer-image-tools")) return;
+      if (event.target.closest?.(".composer-editor img")) return;
+      clearComposerImageSelection();
+    },
+    true
+  );
+  window.addEventListener("resize", () => {
+    if (state.composer && state.composer.selectedImage) {
+      positionComposerImageTools();
+    }
+  });
   composer.addEventListener("submit", async (event) => {
     if (event.target.closest(".composer-form")) {
       event.preventDefault();
@@ -7819,6 +8907,10 @@ function bindEvents() {
   composer.addEventListener("input", (event) => {
     captureComposerFields();
     scheduleDraftSave();
+    scheduleComposerSize(state.composer);
+    if (state.composer && state.composer.selectedImage) {
+      positionComposerImageTools();
+    }
     const input = event.target.closest?.(RECIPIENT_SELECTOR);
     if (input) queueContactSuggestions(input);
   });
@@ -8053,8 +9145,11 @@ window.courierRefresh = async () => {
   }
 };
 
-window.courierOpenThread = async (accountId, threadId) => {
-  if (!accountId || !threadId) return;
+window.courierOpenUpdates = () => {
+  openSettings("updates");
+};
+
+window.courierOpenThread = async (accountId, threadId) => {  if (!accountId || !threadId) return;
   const account = accountFor(accountId);
   if (!account) return;
   dismissSettingsPage();

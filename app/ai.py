@@ -14,6 +14,7 @@ import urllib.request
 from html.parser import HTMLParser
 from typing import Any, Iterable
 
+from . import APP_VERSION
 from .store import Store
 
 SYSTEM_PROMPT = (
@@ -82,7 +83,7 @@ class AIClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream, application/json",
-            "User-Agent": "Courier/0.1",
+            "User-Agent": f"Courier/{APP_VERSION}",
         }
         key = self.config()["api_key"]
         if key:
@@ -131,7 +132,7 @@ class AIClient:
         try:
             if "application/json" in content_type:
                 data = json.loads(response.read().decode("utf-8"))
-                text = _extract_message(data)
+                text = _strip_thinking(_extract_message(data))
                 if text:
                     yield text
                 return
@@ -174,7 +175,7 @@ class AIClient:
             raise AIError("Provider returned an unreadable response.", status=502) from exc
         finally:
             response.close()
-        text = _extract_message(data).strip()
+        text = _strip_thinking(_extract_message(data)).strip()
         text = text.strip("\"' \n\r\t")
         text = text.splitlines()[0].strip() if text else ""
         if not text:
@@ -231,6 +232,40 @@ def _extract_message(data: dict[str, Any]) -> str:
             item.get("text", "") for item in content if isinstance(item, dict)
         )
     return content if isinstance(content, str) else ""
+
+
+_THINKING_NAME = r"(?:think|thinking|reasoning|thought|analysis)"
+
+
+def _strip_thinking(text: str) -> str:
+    value = str(text or "")
+    paired = re.compile(
+        rf"<{_THINKING_NAME}\b[^>]*>.*?</{_THINKING_NAME}\s*>",
+        re.I | re.S,
+    )
+    while True:
+        cleaned = paired.sub("", value)
+        if cleaned == value:
+            break
+        value = cleaned
+    closing = re.compile(rf"</{_THINKING_NAME}\s*>", re.I)
+    while True:
+        match = closing.search(value)
+        if not match:
+            break
+        tail = value[match.end() :]
+        if tail.strip():
+            value = tail
+        else:
+            value = value[: match.start()]
+    unclosed = re.compile(
+        rf"<{_THINKING_NAME}\b[^>]*>.*$", re.I | re.S
+    )
+    value = unclosed.sub("", value)
+    value = re.sub(
+        rf"</?{_THINKING_NAME}\b[^>]*>", "", value, flags=re.I
+    )
+    return value.strip()
 
 
 def _has_text(value: str) -> bool:

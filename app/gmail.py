@@ -22,12 +22,14 @@ import urllib.request
 import uuid
 from typing import Any
 
+from . import APP_VERSION
 from .store import Store
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
+UPLOAD_ROOT = "https://gmail.googleapis.com/upload/gmail/v1/users/me"
 SCOPES = [
     "openid",
     "email",
@@ -35,8 +37,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
-USER_AGENT = "Courier/0.1 (local Gmail client)"
-MAX_SEND_BYTES = 22 * 1024 * 1024
+USER_AGENT = f"Courier/{APP_VERSION} (local Gmail client)"
+MAX_SEND_BYTES = 34 * 1024 * 1024
+LARGE_MESSAGE_BYTES = 2 * 1024 * 1024
 
 
 class GmailError(Exception):
@@ -453,6 +456,120 @@ class GmailClient:
             raise GmailError(str(message), status=exc.code) from exc
         except urllib.error.URLError as exc:
             raise GmailError(f"Could not reach Gmail: {exc.reason}", status=502) from exc
+        except TimeoutError as exc:
+            raise GmailError("Gmail took too long to respond.", status=504) from exc
+        except OSError as exc:
+            raise GmailError(f"Could not reach Gmail: {exc}", status=502) from exc
+
+    def _upload_with_token(
+        self,
+        token_record: dict[str, Any],
+        method: str,
+        path: str,
+        metadata: dict[str, Any],
+        raw: bytes,
+        timeout: int = 120,
+    ) -> dict[str, Any]:
+        boundary = f"courier-{uuid.uuid4().hex}"
+        body = b"".join(
+            [
+                f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode(
+                    "utf-8"
+                ),
+                json.dumps(metadata or {}).encode("utf-8"),
+                b"\r\n",
+                f"--{boundary}\r\nContent-Type: message/rfc822\r\n\r\n".encode(
+                    "utf-8"
+                ),
+                raw,
+                b"\r\n",
+                f"--{boundary}--\r\n".encode("utf-8"),
+            ]
+        )
+        url = f"{UPLOAD_ROOT}/{path.lstrip('/')}?uploadType=multipart"
+        headers = {
+            "Authorization": f"Bearer {token_record['access_token']}",
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Content-Type": f"multipart/related; boundary={boundary}",
+        }
+        request = urllib.request.Request(
+            url, data=body, method=method, headers=headers
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = response.read()
+                return json.loads(payload.decode("utf-8")) if payload else {}
+        except urllib.error.HTTPError as exc:
+            raw_error = exc.read()
+            detail = {}
+            try:
+                detail = json.loads(raw_error.decode("utf-8"))
+            except Exception:
+                pass
+            message = (
+                (detail.get("error") or {}).get("message")
+                if isinstance(detail.get("error"), dict)
+                else detail.get("error")
+            )
+            message = message or f"Gmail request failed ({exc.code})"
+            raise GmailError(str(message), status=exc.code) from exc
+        except urllib.error.URLError as exc:
+            raise GmailError(
+                f"Could not reach Gmail: {exc.reason}", status=502
+            ) from exc
+        except TimeoutError as exc:
+            raise GmailError("Gmail took too long to respond.", status=504) from exc
+        except OSError as exc:
+            raise GmailError(f"Could not reach Gmail: {exc}", status=502) from exc
+
+    def upload(
+        self,
+        account_id: str,
+        method: str,
+        path: str,
+        metadata: dict[str, Any],
+        raw: bytes,
+        timeout: int = 120,
+        _retry: bool = True,
+    ) -> dict[str, Any]:
+        token = self.access_token(account_id)
+        try:
+            return self._upload_with_token(
+                {"access_token": token},
+                method,
+                path,
+                metadata,
+                raw,
+                timeout=timeout,
+            )
+        except GmailError as exc:
+            if exc.status == 401 and _retry:
+                self.access_token(account_id, force=True)
+                return self.upload(
+                    account_id,
+                    method,
+                    path,
+                    metadata,
+                    raw,
+                    timeout=timeout,
+                    _retry=False,
+                )
+            if exc.status == 429 and _retry:
+                time.sleep(2)
+                return self.upload(
+                    account_id,
+                    method,
+                    path,
+                    metadata,
+                    raw,
+                    timeout=timeout,
+                    _retry=False,
+                )
+            if exc.status in (401, 403) and self.store.get_account(account_id):
+                if exc.status == 401:
+                    self.store.update_account(account_id, needs_reauth=1)
+            raise
 
     def api(
         self,
@@ -577,6 +694,16 @@ class GmailClient:
         )
 
     def send_raw(self, account_id: str, raw: bytes, thread_id: str | None = None) -> dict[str, Any]:
+        if len(raw) > LARGE_MESSAGE_BYTES:
+            metadata = {"threadId": thread_id} if thread_id else {}
+            return self.upload(
+                account_id,
+                "POST",
+                "messages/send",
+                metadata,
+                raw,
+                timeout=240,
+            )
         encoded = base64.urlsafe_b64encode(raw).decode("ascii")
         payload = {"raw": encoded}
         if thread_id:
@@ -605,6 +732,15 @@ class GmailClient:
         raw: bytes,
         thread_id: str | None = None,
     ) -> dict[str, Any]:
+        if len(raw) > LARGE_MESSAGE_BYTES:
+            metadata = (
+                {"message": {"threadId": thread_id}}
+                if thread_id
+                else {"message": {}}
+            )
+            return self.upload(
+                account_id, "POST", "drafts", metadata, raw, timeout=240
+            )
         return self.api(
             account_id,
             "POST",
@@ -620,6 +756,20 @@ class GmailClient:
         raw: bytes,
         thread_id: str | None = None,
     ) -> dict[str, Any]:
+        if len(raw) > LARGE_MESSAGE_BYTES:
+            metadata = (
+                {"message": {"threadId": thread_id}}
+                if thread_id
+                else {"message": {}}
+            )
+            return self.upload(
+                account_id,
+                "PUT",
+                f"drafts/{urllib.parse.quote(draft_id, safe='')}",
+                metadata,
+                raw,
+                timeout=240,
+            )
         return self.api(
             account_id,
             "PUT",
@@ -896,7 +1046,7 @@ def build_mime(
             continue
         total += len(data)
         if total > MAX_SEND_BYTES:
-            raise GmailError("Attachments are larger than 22 MB.", status=400)
+            raise GmailError("Attachments are larger than 34 MB.", status=400)
         filename = (
             re.sub(r"[\r\n]+", " ", str(item.get("filename") or "attachment")).strip()
             or "attachment"
@@ -964,4 +1114,10 @@ def build_mime(
             message.add_attachment(
                 data, maintype=maintype, subtype=subtype, filename=filename
             )
-    return bytes(message)
+    raw = bytes(message)
+    if len(raw) > MAX_SEND_BYTES:
+        raise GmailError(
+            "This message is larger than 34 MB. Remove some attachments or inline images.",
+            status=400,
+        )
+    return raw

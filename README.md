@@ -33,6 +33,10 @@ Chromium, no Electron, no Node runtime, and no calendar.
   message in a sandboxed WebKit frame.
 - Keeps running in the tray, checks for new mail on a 10-second, 1-minute, or manual
   schedule, and sends desktop notifications with an optional one-line AI summary.
+- Checks GitHub for new Courier releases manually or automatically every 1, 5, or 8 hours;
+  automatic checks are off by default.
+- Resizes inline images with corner handles or the image menu, which can also move an image
+  out of the body and into the attachment list, or delete it.
 - Has five client themes, five email content themes, resizable panes, split/reading/full
   screen views, and keyboard shortcuts.
 - Talks directly to any OpenAI-compatible endpoint for on-demand summaries. AI is off by
