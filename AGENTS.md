@@ -346,8 +346,9 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
 - The message mount is `.message-body-host`; only the inner `.message-body` carries the
   paper border, padding, and shadow. Do not put the class on both, which produced a
   double frame.
-- `recipientSummary` appends `/ CC: address, ...` to the header summary. Keep the
-  detailed recipient popover as the full To/Cc/Bcc list.
+- `recipientSummary` lists every To recipient by display name (or `me`) and appends
+  `/ CC: name, ...` with display names. Keep the detailed recipient popover as the full
+  To/Cc/Bcc list with addresses.
 - The list header is 49px high to align its bottom border with the reader toolbar.
 - Composer inline images are inserted at the saved selection with a `data-courier-cid`
   marker. On send they are rewritten to `cid:` URLs and sent as inline MIME parts in a
@@ -374,7 +375,10 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
 - DRAFT messages are filtered out of the reader; they belong only to the composer and the
   Drafts folder. `openThread` and `refreshSelectedThreadIfNeeded` both filter message
   labels before assigning `state.selected`, and set the local message count to the visible
-  count so draft-only messages cannot cause endless quiet refreshes.
+  count so draft-only messages cannot cause endless quiet refreshes. A draft save can still
+  move thread metadata, so `refreshSelectedThreadIfNeeded` compares visible message IDs and
+  dates after the fetch. If only the draft changed, it updates the thread head, toolbar, and
+  list in place without rerendering the reader, resetting expansion, or moving scroll.
 - An untouched Reply must not create a Gmail draft. `composer.initialSignature` records
   the prefilled state and `saveComposerDraft` skips it; typing, attachments, or recipient
   changes then save normally. `openComposer` reuses an existing composer for the same
@@ -444,7 +448,9 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   max-width:100%`, so the size survives Gmail drafts and sending. The selection border,
   handles, and actions live in `.editor-wrap`, outside `.composer-editor`, and are never
   serialised into the message. Handles use `--accent-ink` borders and a paper fill so they
-  stay visible on dark themes. Dragging beyond the image's natural width clamps at the
+  stay visible on dark themes. Typing, pressing a caret-moving key, pasting, or clicking
+  elsewhere in the composer clears the selection and hides the border; modifier keys alone
+  keep it. Dragging beyond the image's natural width clamps at the
   original size and shows a small `Already at original size` hint to the right of the
   corner handle. The hint is positioned once and does not follow the pointer. Right-clicking
   an inline image opens the custom menu with **Small**, **Original Size**, **Convert to
@@ -514,9 +520,11 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   until every rendered message frame has loaded, measured, and settled its images; then
   the spinner is removed. Multi-message threads scroll once to the latest message;
   single-message threads stay at the top of that message. Expansion state is reset on
-  every open and background refresh: all messages for three or fewer, otherwise only the
-  newest. Carrying old expansion state across a refresh let previously expanded images
-  shift the final scroll position. The spinner has a three second fallback so a failed
+  every open, and on a background refresh only when visible messages actually changed: all
+  messages for three or fewer, otherwise only the newest. Carrying old expansion state
+  across a refresh let previously expanded images shift the final scroll position. A
+  metadata-only refresh caused by the open reply draft must leave the existing frames,
+  expansion, and scroll untouched. The spinner has a three second fallback so a failed
   frame cannot leave the reader hidden.
 - The loading-to-content handoff must replace only `.thread-content` with
   `preserveChrome: true`; rebuilding the toolbar or `.thread-head` there causes visible

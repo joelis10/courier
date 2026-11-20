@@ -1173,33 +1173,21 @@ function toolbarHtml(thread) {
 }
 
 function recipientSummary(message, account) {
-  const to = message.to || [];
-  const cc = message.cc || [];
-  const me = (account && account.email ? account.email : "").toLowerCase();
-  const inTo = to.some((person) => (person.email || "").toLowerCase() === me);
-  const names = [];
-  for (const person of to) {
-    const email = (person.email || "").toLowerCase();
-    if (email === me) names.push("me");
-    else names.push(decodeEntities(person.name || person.email));
-  }
-  if (!names.length && cc.length) {
-    for (const person of cc) {
-      names.push(
-        (person.email || "").toLowerCase() === me
-          ? "me"
-          : decodeEntities(person.name || person.email)
-      );
-    }
-  }
-  let summary = inTo ? "to me" : `to ${names.slice(0, 2).join(", ")}`;
-  if (!inTo && names.length > 2) summary += ` and ${names.length - 2} more`;
-  if (!inTo && !names.length) summary = "to undisclosed recipients";
-  const ccEmails = cc
-    .map((person) => (person.email || person.name || "").trim())
-    .filter(Boolean);
-  if (ccEmails.length) {
-    summary += ` / CC: ${ccEmails.join(", ")}`;
+  const me = (account && account.email ? account.email : "")
+    .trim()
+    .toLowerCase();
+  const label = (person) => {
+    const email = (person.email || "").trim().toLowerCase();
+    if (email && email === me) return "me";
+    return decodeEntities(person.name || person.email || "").trim();
+  };
+  const toNames = (message.to || []).map(label).filter(Boolean);
+  const ccNames = (message.cc || []).map(label).filter(Boolean);
+  let summary = toNames.length
+    ? `to ${toNames.join(", ")}`
+    : "to undisclosed recipients";
+  if (ccNames.length) {
+    summary += ` / CC: ${ccNames.join(", ")}`;
   }
   return summary;
 }
@@ -6074,6 +6062,15 @@ function invalidateThreadSummaries(key) {
   if (state.summary && state.summary.threadKey === key) closeSummary();
 }
 
+function visibleThreadMessagesUnchanged(before, after) {
+  if (before.length !== after.length) return false;
+  return before.every(
+    (message, index) =>
+      message.id === after[index].id &&
+      Number(message.date) === Number(after[index].date)
+  );
+}
+
 async function refreshSelectedThreadIfNeeded(options = {}) {
   if (
     state.threadRefreshing ||
@@ -6116,18 +6113,35 @@ async function refreshSelectedThreadIfNeeded(options = {}) {
     ) {
       return;
     }
+    const previousMessages = state.selected.messages || [];
     const messages = (data.messages || []).filter(
       (message) => !(message.labels || []).includes("DRAFT")
     );
+    const visibleUnchanged = visibleThreadMessagesUnchanged(
+      previousMessages,
+      messages
+    );
     state.selected = { ...data, messages };
     state.readerLoading = false;
-    state.expanded = defaultExpanded(messages);
     setThreadLocal(current.account_id, current.id, {
       unread: Boolean(data.thread.unread),
       labels: data.thread.labels || [],
       message_count: messages.length,
       last_date: data.thread.last_date,
     });
+    if (visibleUnchanged) {
+      // Draft saves change thread metadata and can move last_date, but they
+      // must not rebuild the open reader or reset its scroll and expansion.
+      updateThreadHead(data.thread, messages.length);
+      updateThreadToolbarState(data.thread);
+      renderList();
+      updateReaderPane();
+      if (windowIsActive() && data.thread.unread) {
+        actOnThread("read", { thread: data.thread });
+      }
+      return;
+    }
+    state.expanded = defaultExpanded(messages);
     invalidateThreadSummaries(key);
     const keepBottom = wasNearBottom || options.toBottom;
     renderReader({ settle: keepBottom, preserveChrome: true });
@@ -9103,6 +9117,14 @@ function bindEvents() {
   composer.addEventListener("keydown", async (event) => {
     if (event.isComposing) return;
     if (
+      state.composer &&
+      state.composer.selectedImage &&
+      event.target.closest?.(".composer-editor") &&
+      !["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(event.key)
+    ) {
+      clearComposerImageSelection();
+    }
+    if (
       event.target.closest?.(".composer-editor") &&
       (event.ctrlKey || event.metaKey) &&
       !event.altKey
@@ -9248,6 +9270,13 @@ function bindEvents() {
     captureComposerFields();
     scheduleDraftSave();
     scheduleComposerSize(state.composer);
+    if (
+      state.composer &&
+      state.composer.selectedImage &&
+      event.target.closest?.(".composer-editor")
+    ) {
+      clearComposerImageSelection();
+    }
     if (state.composer && state.composer.selectedImage) {
       positionComposerImageTools();
     }
