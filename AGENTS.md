@@ -729,8 +729,9 @@ python3 -m unittest discover -s tests -v
 ```
 
 CI runs the same tests and JavaScript syntax checks before building the package. The
-Debian workflow uses the standard Ubuntu 24.04 GitHub-hosted runner, which is free for
-public repositories. Pushing a `v*` tag attaches the built `.deb` to a GitHub Release.
+Debian workflow runs only on `v*` tags and manual dispatch, not on ordinary commits or
+pushes. It uses the standard Ubuntu 24.04 GitHub-hosted runner, which is free for public
+repositories. Pushing a `v*` tag attaches the built `.deb` to a GitHub Release.
 
 The 55 tests cover thread metadata extraction, plain-text fallback, inline/attachment
 parsing, MIME construction, folder counting/archive/drafts semantics, thread label updates,

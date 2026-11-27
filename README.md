@@ -125,10 +125,10 @@ database alone.
 sudo apt install ./dist/courier_1.0.0-1_all.deb
 ```
 
-The workflow builds a `.deb` on every push and pull request, uploads it as an artifact,
-and attaches it to a GitHub Release when a tag such as `v1.0.0` is pushed. It uses the
-standard Ubuntu 24.04 GitHub-hosted runner. GitHub does not charge for standard runner
-minutes or artifact storage on public repositories.
+The workflow builds a `.deb` when a `v*` tag is pushed or the workflow is started manually,
+uploads it as an artifact, and attaches it to a GitHub Release for tags. It does not run on
+ordinary commits or pushes. It uses the standard Ubuntu 24.04 GitHub-hosted runner. GitHub
+does not charge for standard runner minutes or artifact storage on public repositories.
 
 ## Connect Gmail
 
