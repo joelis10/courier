@@ -150,6 +150,12 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   Pub/Sub webhook; polling at this rate is far below documented Gmail quotas.
 - Secrets (OAuth client secret, refresh tokens, AI key) stay server-side and are never
   returned to the browser.
+- A token endpoint failure sets `needs_reauth` only for `invalid_client`, `invalid_grant`,
+  `invalid_scope`, or `unauthorized_client`. Rate limits, 5xx responses, and network errors
+  stay transient, so a temporary Google outage cannot log an account out. Accounts already
+  marked `needs_reauth` are skipped by the sync loop; the sidebar **Reconnect** action and
+  the existing error state remain until sign-in succeeds, without repeating the same log and
+  toast every 10 seconds.
 - UI preferences are stored in the `ui_prefs` setting, not `localStorage`. The server
   injects theme, accent, and content-width into `<html>` in `_serve_index` so the first
   paint already has the saved appearance. Do not reintroduce `boot.js`.
@@ -290,7 +296,46 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   including All accounts. Chevron expansion is independent of the current filter.
 - Account badges are omitted while `accountFilter` is set; they return in the merged view.
   Label chips do not disappear in that case.
-- Schema v7 adds the `views` table and `accounts.default_view_id`.
+- Schema v7 adds the `views` table and `accounts.default_view_id`. Schema v8 adds
+  `accounts.signature_enabled` and `accounts.signature_html`.
+- Account signatures live on the account, not in UI preferences. The account editor has a
+  **Signature** toggle that reveals **Signature editor**. Its wide modal is titled
+  **Signature editor for [email]**, is capped at 80vh, and explains that the signature is
+  added automatically. The lorem ipsum sample sits above the signature inside the same
+  uneditable paper, with `user-select:none`; clicking it explains that it is example text.
+  A rich text editor provides the composer formatting, link, image insertion, image
+  resizing, and toolbar/keyboard undo and redo, with a **Signature goes here...**
+  placeholder when empty. Closing a changed editor through Cancel, Escape, or the backdrop
+  asks **Discard signature changes?** with **Discard** and **Return to editor**. Signature
+  images are stored as data URLs and are converted to inline MIME parts when sent.
+  Signature HTML is sanitised with DOMPurify before saving and capped at 6 MiB. The
+  signature toggle and the modal save immediately. The account editor's Save/Cancel buttons
+  sit above a divider before the Signature section and only persist the account fields above
+  that divider.
+- The composer editor and signature editor paper follow the selected `emailTheme` while
+  their content is plain. Any styling, formatting element, link, table, or image switches
+  the paper to Fog white so the editor matches what the recipient sees. Returning to plain
+  content restores the selected theme without a toast. The first switch to white in an app
+  session shows **Styling detected. Changed background to match what the recipient would
+  see.** once; later switches do not repeat it. A MutationObserver on each editor keeps the
+  paper class in sync with typing, formatting, pasted content, images, and signature
+  changes.
+- `/api/state` never includes signature HTML. `GET /api/signatures` loads the per-account
+  HTML once into `state.signatures`; account updates return the saved HTML so the cache can
+  be refreshed without polling it every five seconds.
+- The composer inserts an enabled account signature as an editable trailing
+  `div[data-courier-signature]` block after a `div[data-composer-body-start]` spacer. The
+  spacer provides the line for text entry and the usual **Write a message** placeholder
+  when the body is still empty. Changing the From account updates the editor DOM in place
+  instead of re-rendering the composer, preserves the message and the
+  `data-composer-body-start` spacer, restores the previous caret, captures the old
+  signature into `composer.signatureOverrides`, and restores edited signatures when
+  switching back.
+  Drafts retain the wrapper and edits; opening a draft preserves an existing wrapper when
+  its account still matches, and otherwise replaces it. The wrapper is unwrapped only for
+  send so Gmail drafts and repeated opens do not duplicate the signature. Reply composers
+  put the caret in the spacer. Signature images stay data URLs in the editor and are
+  adopted by the normal inline-image path on draft save or send.
 - Custom views live in the `views` table and are scoped to one account. The filter shape
   is `include_labels`, `exclude_labels`, `include_senders`, `exclude_senders`,
   `include_subject`, and `exclude_subject`. Include labels and senders are ANDed; excludes
@@ -325,6 +370,12 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   reader as "you" makes small models answer the action question explicitly.
 - The app window must never scroll. `bindEvents` resets `window.scrollY` to zero so focusing
   a Settings control cannot move the whole shell and take the sticky header away.
+- Settings copy sits directly under the option it describes. Notes use a 2–4px top gap,
+  and a row or action block immediately following a note has no `border-top`; the account
+  editor has no internal row/action dividers. The account editor has a single divider above
+  the independent Signature section, and the Notifications Sound row keeps its separator
+  after the archived-mail note. Toasts sit above the modal layer so feedback remains
+  visible while a dialog is open.
 - Email content themes are separate from client themes: `emailTheme` is fog, linen, sepia,
   graphite, or midnight. The five content themes pair with the client themes and live in
   the Appearance section below the client theme tiles, with paper preview tiles. Old saved
@@ -597,8 +648,17 @@ compares it with the latest GitHub release tag returned by `releases/latest`.
   seconds, baselines at startup, skips sent/spam/trash threads, and uses libnotify. The
   default sound is the bundled `app/sounds/soft-knock.wav`; system sounds live under
   `/usr/share/sounds/freedesktop/stereo`, and playback uses `ffplay` first, then
-  `paplay`, `pw-play`, and `aplay`. Custom sounds are uploaded to `data_dir/sounds` by
+  `paplay`, `pw-play`, and `aplay`. Playback runs in a background thread, checks each
+  player's exit code, falls back to the next player, and logs a changed failure instead of
+  failing silently. Custom sounds are uploaded to `data_dir/sounds` by
   `POST /api/notification-sound` and never leave the local machine.
+- Missed mail found while the first startup sync is running is buffered instead of
+  producing one notification per thread. When two or more threads are eligible, the
+  monitor sends one `X+ new notifications` summary after the sync finishes; a single
+  eligible thread keeps the normal sender/subject notification. The count uses eligible
+  threads, and the `+` is a lower bound because filters and the 40-thread poll cap can hide
+  additional mail. The startup window ends after the first sync, with a 90-second safety
+  cap.
 - Notification preferences are `notifyEnabled`, `notifyArchived`, `notifySound`,
   `notifySoundPath`, `notifyShowAccount`, `notifyBadgePosition`, `notifyUseAI`, and
   `notifyAIMinChars`. `notifyArchived` defaults to false; archived threads without
@@ -672,15 +732,17 @@ CI runs the same tests and JavaScript syntax checks before building the package.
 Debian workflow uses the standard Ubuntu 24.04 GitHub-hosted runner, which is free for
 public repositories. Pushing a `v*` tag attaches the built `.deb` to a GitHub Release.
 
-The 49 tests cover thread metadata extraction, plain-text fallback, inline/attachment
+The 55 tests cover thread metadata extraction, plain-text fallback, inline/attachment
 parsing, MIME construction, folder counting/archive/drafts semantics, thread label updates,
 account metadata, refresh intervals, user-label merging and label paging, folder paging,
 older-page fetching with Gmail page tokens, notification default actions, archived-mail
 filtering, self-sent filtering, outgoing-name and ID-token fallbacks, AI signature/quote
 cleaning, AI and Google-setup preference defaults, AI notification gating, contact name
 resolution, custom view filtering/default clearing, release asset version matching and
-checksum selection, download digest verification, installer command construction, and a
-full sync plus lazy thread load using a fake Gmail client. UI smoke tests
+checksum selection, download digest verification, installer command construction, refresh
+error classification, reauthorisation skipping, startup notification aggregation, account
+signature storage, and a full sync plus lazy thread load using a fake Gmail client. UI smoke
+tests
 cover custom account names/colours, the four badge and label positions, wide/full reader
 widths, header clicks, entity decoding, summary scope and scroll containment, labels/Show
 more, custom view creation/filtering/default view, draft filtering/no empty reply drafts,

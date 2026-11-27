@@ -27,6 +27,8 @@ Chromium, no Electron, no Node runtime, and no calendar.
 - Reads, searches, archives, stars, labels, and trashes mail without leaving the desktop.
 - Sends replies, reply-alls, forwards, and new messages with attachments and inline images.
 - Saves drafts to Gmail while you type and restores them with recipients and attachments.
+- Adds a per-account rich text signature from Settings, with formatted text and inline
+  images, and inserts it below the message text in new messages and replies.
 - Guides first-time Gmail setup with a step-by-step Google Cloud modal and client JSON
   import, then verifies the granted scopes.
 - Folds signatures and quoted replies, blocks remote images by default, and renders each
@@ -157,8 +159,16 @@ clients accept loopback ports, so there is no redirect URI to configure by hand.
 
 Accounts share the unified inbox; every subject line carries a small badge with that
 account's username. Right-click an account in the sidebar and choose **Customize account**,
-or click **Edit** in Settings, to change its badge username, colour, **Outgoing name**, or
-default view. The outgoing name is the display name used in the From header for new
+or click **Edit** in Settings, to change its badge username, colour, **Outgoing name**,
+default view, or signature. The signature toggle reveals a rich text editor with a sample
+message above it, so images and formatting can be checked in context. Signature images are
+sent inline and the signature is added below the message text in new messages and replies.
+The signature remains editable in the composer; changing the From account replaces it with
+that account's signature. The composer and signature editor use the selected email content
+theme for plain text and switch to white paper when styling or images are present, matching
+what recipients see.
+
+The outgoing name is the display name used in the From header for new
 messages; already-sent messages keep the name they were sent with. If recipients still see
 an old name, update **Send mail as** in Gmail's account settings as well. The full address
 is still shown in Settings and in the badge tooltip. The signed-in app can remain
@@ -168,9 +178,14 @@ apps.
 Google expires refresh tokens after 7 days for external apps whose publishing status is
 Testing. Courier will flag the account as expired and Settings will offer Reconnect. To
 avoid weekly reconnects, complete Branding and select **Publish app** on the
-**Audience** page. For these restricted Gmail scopes, production may require Google
-verification. A Google Workspace project with an Internal user type avoids both the
-7-day limit and verification, but is only available inside a Workspace organization.
+**Audience** page. Publishing is free, and Google does not charge a verification fee. For
+personal use or a limited audience under 100 users, verification is optional: users can
+click through the unverified-app warning, subject to the 100-user cap. Wider public
+distribution may require verification, and verified apps that handle restricted Gmail data
+on remote servers may need a third-party CASA security assessment, which is paid to the
+assessor. Reconnect each account after publishing so it receives a production refresh
+token. A Google Workspace project with an Internal user type avoids the 7-day limit, the
+warning, and verification, but is only available inside a Workspace organization.
 
 Courier asks only for Gmail modify and send access, plus the basic OpenID profile used for
 the From name. It does not request Calendar, Contacts, or Drive.

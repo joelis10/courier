@@ -2793,6 +2793,171 @@ body.composer-image-resizing {
   color: var(--text);
 }
 
+.modal-sheet.signature-modal {
+  width: min(1120px, calc(100vw - 48px));
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.signature-paper {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  background: var(--editor-paper-bg, var(--surface));
+  color: var(--editor-paper-ink, var(--text));
+  box-shadow: inset 0 1px 0 var(--highlight);
+  overflow: hidden;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.signature-sample {
+  padding: 12px 14px 0;
+  color: var(--editor-paper-ink, var(--text-2));
+  font-size: 13.5px;
+  line-height: 1.55;
+  user-select: none;
+}
+
+.signature-sample p {
+  margin: 0 0 12px;
+}
+
+.signature-editor-wrap {
+  min-height: 180px;
+  max-height: none;
+  background: transparent;
+}
+
+.signature-editor {
+  min-height: 180px;
+  padding-top: 0;
+  color: var(--editor-paper-ink, var(--text));
+}
+
+.signature-paper .signature-editor a {
+  color: var(--editor-paper-link, var(--accent-ink));
+}
+
+.signature-paper .signature-editor blockquote {
+  border-left-color: var(--editor-paper-line, var(--border));
+  color: var(--editor-paper-muted, var(--muted));
+}
+
+.signature-format-bar {
+  border: 1px solid var(--border);
+  border-top: 1px solid var(--hairline);
+  border-radius: 0 0 6px 6px;
+  background: var(--surface);
+}
+
+.signature-discard-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+}
+
+.signature-discard-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 24, 28, 0.48);
+}
+
+.signature-discard-sheet {
+  position: relative;
+  z-index: 1;
+  width: min(380px, calc(100vw - 40px));
+  padding: 17px 18px 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background-color: var(--surface);
+  background-image: linear-gradient(to bottom, var(--chrome-hi), transparent 48px);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32), inset 0 1px 0 var(--highlight);
+}
+
+.editor-wrap.editor-paper {
+  background: var(--editor-paper-bg);
+  color: var(--editor-paper-ink);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.editor-wrap.editor-paper .composer-editor {
+  color: var(--editor-paper-ink);
+}
+
+.editor-wrap.editor-paper .composer-editor a {
+  color: var(--editor-paper-link);
+}
+
+.editor-wrap.editor-paper .composer-editor blockquote {
+  border-left-color: var(--editor-paper-line);
+  color: var(--editor-paper-muted);
+}
+
+.signature-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.signature-link-input {
+  flex: 1;
+  min-width: 0;
+  height: 29px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.signature-link-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.22);
+}
+
+.signature-error {
+  min-height: 16px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.signature-error.error {
+  color: var(--danger);
+}
+
+.signature-error:empty {
+  display: none;
+}
+
+.composer-signature {
+  margin-top: 8px;
+}
+
+.composer-signature img {
+  max-width: 100%;
+  height: auto;
+}
+
+.editor-wrap.show-composer-placeholder::before {
+  content: "Write a message";
+  position: absolute;
+  top: 10px;
+  left: 14px;
+  z-index: 1;
+  color: var(--editor-paper-muted, var(--muted));
+  font-size: 13.5px;
+  line-height: 1.55;
+  pointer-events: none;
+}
+
 .cursor-hint {
   position: fixed;
   z-index: 400;
@@ -3375,7 +3540,7 @@ body.composer-image-resizing {
 }
 
 .settings-note {
-  margin: 9px 2px 0;
+  margin: 4px 2px 0;
   color: var(--muted);
   font-size: 11px;
   line-height: 1.5;
@@ -3383,7 +3548,34 @@ body.composer-image-resizing {
 
 .settings-group > .settings-note {
   margin: 0;
-  padding: 9px 13px 11px;
+  padding: 2px 13px 10px;
+}
+
+.account-editor .settings-note {
+  margin: 3px 0 4px;
+}
+
+.account-editor .pref-row,
+.account-editor .settings-actions {
+  border-top: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.account-signature-divider {
+  margin-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.settings-note + .pref-row,
+.settings-note + .field-grid,
+.settings-note + .setting-row,
+.settings-note + .settings-actions {
+  border-top: 0;
+}
+
+.settings-note + .pref-row.notify-sound-row {
+  border-top: 1px solid var(--hairline);
 }
 
 .settings-select {
@@ -3417,7 +3609,7 @@ body.composer-image-resizing {
 
 .settings-cluster > .settings-note {
   margin: 0;
-  padding: 0 13px 11px;
+  padding: 2px 13px 10px;
 }
 
 .notify-sound-field {
@@ -4172,7 +4364,7 @@ code {
   position: fixed;
   top: 68px;
   right: 18px;
-  z-index: 200;
+  z-index: 500;
   display: flex;
   flex-direction: column;
   align-items: flex-end;

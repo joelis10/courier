@@ -8,6 +8,7 @@ import io
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -20,6 +21,7 @@ from app.gmail import (
     build_mime,
     build_thread_summary,
     parse_thread_full,
+    refresh_failure,
 )
 from app.store import Store
 from app.sync import SyncManager
@@ -192,6 +194,29 @@ class GmailParsingTests(unittest.TestCase):
         parsed = parse_thread_full("acct", {"id": "pt", "messages": [msg]})[0]
         self.assertIn("<p>One line</p>", parsed["body_html"])
         self.assertIn("Second paragraph", parsed["body_html"])
+
+    def test_only_known_refresh_errors_require_reauthorisation(self):
+        needs, message = refresh_failure(
+            {"error": "invalid_grant", "error_description": "Token has been expired or revoked."},
+            400,
+        )
+        self.assertTrue(needs)
+        self.assertEqual(message, "Token has been expired or revoked.")
+
+        needs, message = refresh_failure(
+            {"error": "invalid_client", "error_description": "Unauthorized"},
+            401,
+        )
+        self.assertTrue(needs)
+        self.assertEqual(message, "Unauthorized")
+
+        needs, message = refresh_failure({}, 503)
+        self.assertFalse(needs)
+        self.assertEqual(message, "Google returned HTTP 503")
+
+        needs, message = refresh_failure({"error": "invalid_request"}, 400)
+        self.assertFalse(needs)
+        self.assertEqual(message, "invalid_request")
 
 
 class MimeTests(unittest.TestCase):
@@ -409,6 +434,8 @@ class MigrationTests(unittest.TestCase):
                 self.assertIsNone(row["username"])
                 self.assertIn("default_view_id", row.keys())
                 self.assertIsNone(row["default_view_id"])
+                self.assertIn("signature_enabled", row.keys())
+                self.assertIn("signature_html", row.keys())
                 self.assertEqual(store.views(), [])
             finally:
                 store.close()
@@ -860,6 +887,22 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(second), 1)
         self.assertNotEqual(first[0]["id"], second[0]["id"])
 
+    def test_account_signature_round_trip(self):
+        self.store.update_account(
+            "a1",
+            signature_enabled=1,
+            signature_html="<p>Joel<br>Courier</p>",
+        )
+        account = self.store.get_account("a1")
+        self.assertEqual(account["signature_enabled"], 1)
+        self.assertEqual(account["signature_html"], "<p>Joel<br>Courier</p>")
+        self.store.update_account(
+            "a1", signature_enabled=0, signature_html=""
+        )
+        account = self.store.get_account("a1")
+        self.assertEqual(account["signature_enabled"], 0)
+        self.assertEqual(account["signature_html"], "")
+
     def test_refresh_intervals(self):
         manager = SyncManager(self.store, FakeGmail(make_thread()))
         self.assertEqual(manager._refresh_interval(), 10)
@@ -867,6 +910,14 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(manager._refresh_interval(), 60)
         self.store.set_setting("refresh_mode", "manual")
         self.assertEqual(manager._refresh_interval(), 0)
+
+    def test_accounts_needing_reauthorisation_are_not_synced(self):
+        manager = SyncManager(self.store, FakeGmail(make_thread()))
+        self.store.update_account("a1", needs_reauth=1)
+        manager._run_all(None)
+        self.assertEqual(manager.status()["errors"], {})
+        self.assertEqual(self.store.get_account("a1")["last_sync"], 0)
+        self.assertGreater(manager.status()["last_finished"], 0)
 
 
 class FakeNotification:
@@ -1206,6 +1257,39 @@ class OutgoingNameTests(unittest.TestCase):
         )
 
 
+class FakeNotifySync:
+    def __init__(self):
+        self.syncing = False
+        self.last_finished = 1
+
+    def status(self):
+        return {
+            "syncing": self.syncing,
+            "last_finished": self.last_finished,
+        }
+
+
+class FakeNotifyTickStore:
+    def __init__(self, threads):
+        self.threads = threads
+
+    def list_threads(self, folder="all", limit=100):
+        return self.threads[:limit]
+
+    def get_account(self, account_id):
+        if account_id == "acc-1":
+            return {"email": "joel@example.com", "username": "Joel"}
+        return None
+
+    def accounts(self):
+        return [{"id": "acc-1"}]
+
+    def get_setting(self, key):
+        if key == "ui_prefs":
+            return '{"notifyEnabled":true,"notifySound":"none"}'
+        return None
+
+
 class NotificationTests(unittest.TestCase):
     def setUp(self):
         FakeNotify.created = []
@@ -1343,6 +1427,137 @@ class NotificationTests(unittest.TestCase):
             base | {"last_from_email": "ana@example.com"}, self.prefs
         )
         self.assertEqual(notified, ["thread-1"])
+
+    def startup_monitor(self, threads, sync=None):
+        app = FakeNotifyApp()
+        app.store = FakeNotifyTickStore(threads)
+        app.sync = sync or FakeNotifySync()
+        monitor = NotificationMonitor(app, Path("/nonexistent/courier.svg"))
+        monitor.notify = FakeNotify
+        monitor.GLib = FakeGLib
+        monitor.seen = {}
+        monitor.startup = True
+        monitor.startup_started = 0
+        monitor.startup_pending = {}
+        return monitor
+
+    def test_startup_missed_mail_sends_one_summary_notification(self):
+        threads = [
+            {
+                "account_id": "acc-1",
+                "id": f"thread-{index}",
+                "labels": ["INBOX"],
+                "unread": True,
+                "last_from_email": f"sender{index}@example.com",
+                "last_date": 1000 + index,
+            }
+            for index in range(3)
+        ]
+        threads.extend(
+            [
+                {
+                    "account_id": "acc-1",
+                    "id": "read",
+                    "labels": ["INBOX"],
+                    "unread": False,
+                    "last_from_email": "read@example.com",
+                    "last_date": 1003,
+                },
+                {
+                    "account_id": "acc-1",
+                    "id": "spam",
+                    "labels": ["SPAM"],
+                    "unread": True,
+                    "last_from_email": "spam@example.com",
+                    "last_date": 1004,
+                },
+            ]
+        )
+        monitor = self.startup_monitor(threads)
+        sent = []
+        dispatched = []
+        monitor._send_notification = (
+            lambda title, body, prefs, target=None: sent.append(
+                (title, body, target)
+            )
+        )
+        monitor._notify = (
+            lambda thread, _prefs, _summary: dispatched.append(thread["id"])
+        )
+        monitor._tick()
+        self.assertEqual(
+            sent,
+            [
+                (
+                    "3+ new notifications",
+                    "New mail since Courier was last opened.",
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(dispatched, [])
+
+    def test_startup_single_missed_thread_keeps_normal_notification(self):
+        threads = [
+            {
+                "account_id": "acc-1",
+                "id": "thread-1",
+                "labels": ["INBOX"],
+                "unread": True,
+                "last_from_email": "ana@example.com",
+                "last_date": 1000,
+            }
+        ]
+        monitor = self.startup_monitor(threads)
+        sent = []
+        dispatched = []
+        monitor._send_notification = (
+            lambda title, body, prefs, target=None: sent.append(
+                (title, body, target)
+            )
+        )
+        monitor._notify = (
+            lambda thread, _prefs, _summary: dispatched.append(thread["id"])
+        )
+        monitor._tick()
+        self.assertEqual(sent, [])
+        self.assertEqual(dispatched, ["thread-1"])
+
+    def test_startup_waits_for_the_initial_sync(self):
+        threads = [
+            {
+                "account_id": "acc-1",
+                "id": f"thread-{index}",
+                "labels": ["INBOX"],
+                "unread": True,
+                "last_from_email": f"sender{index}@example.com",
+                "last_date": 1000 + index,
+            }
+            for index in range(2)
+        ]
+        sync = FakeNotifySync()
+        sync.syncing = True
+        sync.last_finished = 0
+        monitor = self.startup_monitor(threads, sync=sync)
+        monitor.startup_started = time.monotonic()
+        sent = []
+        monitor._send_notification = (
+            lambda title, body, prefs, target=None: sent.append(
+                (title, body, target)
+            )
+        )
+        monitor._notify = lambda _thread, _prefs, _summary: None
+        monitor._tick()
+        self.assertEqual(sent, [])
+        self.assertTrue(monitor.startup)
+        self.assertEqual(len(monitor.startup_pending), 2)
+
+        sync.syncing = False
+        sync.last_finished = 1
+        monitor.startup_started -= 4
+        monitor._tick()
+        self.assertEqual(sent[0][0], "2+ new notifications")
+        self.assertFalse(monitor.startup)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 FOLDERS = ("inbox", "starred", "sent", "drafts", "spam", "trash", "archive")
 FOLDER_LABELS = {
@@ -82,6 +82,8 @@ class Store:
                 last_sync INTEGER DEFAULT 0,
                 needs_reauth INTEGER DEFAULT 0,
                 default_view_id INTEGER,
+                signature_enabled INTEGER DEFAULT 0,
+                signature_html TEXT DEFAULT '',
                 created_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS threads (
@@ -165,6 +167,14 @@ class Store:
             self.conn.execute("ALTER TABLE accounts ADD COLUMN username TEXT")
         if "default_view_id" not in columns:
             self.conn.execute("ALTER TABLE accounts ADD COLUMN default_view_id INTEGER")
+        if "signature_enabled" not in columns:
+            self.conn.execute(
+                "ALTER TABLE accounts ADD COLUMN signature_enabled INTEGER DEFAULT 0"
+            )
+        if "signature_html" not in columns:
+            self.conn.execute(
+                "ALTER TABLE accounts ADD COLUMN signature_html TEXT DEFAULT ''"
+            )
         thread_columns = {
             row["name"] for row in self.conn.execute("PRAGMA table_info(threads)")
         }
@@ -379,6 +389,8 @@ class Store:
             "last_sync",
             "needs_reauth",
             "default_view_id",
+            "signature_enabled",
+            "signature_html",
         }
         keys = [k for k in fields if k in allowed]
         if not keys:

@@ -127,6 +127,7 @@ class SyncManager:
             accounts = self.store.accounts()
             if account_id:
                 accounts = [a for a in accounts if a["id"] == account_id]
+            accounts = [a for a in accounts if not a["needs_reauth"]]
             for index, account in enumerate(accounts):
                 if self._stop.is_set():
                     break

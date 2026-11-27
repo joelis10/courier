@@ -37,6 +37,7 @@ from .updater import (
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 TOKEN_HEADER = "X-Courier-Token"
+SIGNATURE_BYTES_LIMIT = 6 * 1024 * 1024
 
 
 def _outgoing_name(account) -> str:
@@ -312,6 +313,12 @@ class App:
             else None,
             "last_sync": row["last_sync"] or 0,
             "scope": row["scope"] if "scope" in row.keys() else "",
+            "signature_enabled": bool(row["signature_enabled"])
+            if "signature_enabled" in row.keys()
+            else False,
+            "signature_present": bool(row["signature_html"])
+            if "signature_html" in row.keys()
+            else False,
             "unread": counts.get("unread", 0),
             "inbox_unread": counts.get("inbox_unread", 0),
             "folders": counts.get("folders", {}),
@@ -640,6 +647,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/update/status":
             self._send_json(self.app.updates.status())
+            return
+        if path == "/api/signatures":
+            self._send_json(
+                {
+                    "signatures": {
+                        row["id"]: str(row["signature_html"] or "")
+                        for row in self.app.store.accounts()
+                    }
+                }
+            )
             return
         if path == "/api/contacts":
             contacts = self.app.store.contact_suggestions(
@@ -1441,11 +1458,24 @@ class ApiHandler(BaseHTTPRequestHandler):
                 updates["default_view_id"] = view_id
             else:
                 updates["default_view_id"] = None
+        if "signature_enabled" in payload:
+            updates["signature_enabled"] = (
+                1 if payload.get("signature_enabled") else 0
+            )
+        if "signature_html" in payload:
+            signature_html = str(payload.get("signature_html") or "")
+            if len(signature_html.encode("utf-8")) > SIGNATURE_BYTES_LIMIT:
+                raise ApiError("Signature is too large. Use smaller images.", 400)
+            updates["signature_html"] = signature_html
         if updates:
             self.app.store.update_account(account_id, **updates)
+        saved = self.app.store.get_account(account_id)
         self._send_json({
-            "account": self.app.account_public(self.app.store.get_account(account_id)),
+            "account": self.app.account_public(saved),
             "state": self.app.state(),
+            "signature_html": str(saved["signature_html"] or "")
+            if saved and "signature_html" in saved.keys()
+            else "",
         })
 
     def _save_view(self, payload: dict[str, Any]) -> None:

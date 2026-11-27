@@ -40,6 +40,25 @@ SCOPES = [
 USER_AGENT = f"Courier/{APP_VERSION} (local Gmail client)"
 MAX_SEND_BYTES = 34 * 1024 * 1024
 LARGE_MESSAGE_BYTES = 2 * 1024 * 1024
+REAUTH_REFRESH_ERRORS = {
+    "invalid_client",
+    "invalid_grant",
+    "invalid_scope",
+    "unauthorized_client",
+}
+
+
+def refresh_failure(detail: dict[str, Any], status: int) -> tuple[bool, str]:
+    """Return whether a token endpoint failure needs a fresh sign-in, and its text."""
+    code = str(detail.get("error") or "").strip()
+    description = str(detail.get("error_description") or "").strip()
+    if description:
+        message = description
+    elif code:
+        message = code
+    else:
+        message = f"Google returned HTTP {status}"
+    return code in REAUTH_REFRESH_ERRORS, message
 
 
 class GmailError(Exception):
@@ -363,9 +382,16 @@ class GmailClient:
                     detail = json.loads(exc.read().decode("utf-8"))
                 except Exception:
                     pass
-                self.store.update_account(account_id, needs_reauth=1)
-                message = detail.get("error_description") or detail.get("error") or "Google sign-in expired"
-                raise AuthError(f"{account['email']}: {message}", status=401) from exc
+                needs_reauth, message = refresh_failure(detail, exc.code)
+                if needs_reauth:
+                    self.store.update_account(account_id, needs_reauth=1)
+                    raise AuthError(
+                        f"{account['email']}: {message}", status=401
+                    ) from exc
+                raise GmailError(
+                    f"Could not refresh Google sign-in: {message}",
+                    status=429 if exc.code == 429 else 502,
+                ) from exc
             except Exception as exc:
                 raise GmailError(f"Could not refresh Google sign-in: {exc}", status=502) from exc
             expiry = int(time.time() * 1000) + int(tokens.get("expires_in", 3600)) * 1000

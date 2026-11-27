@@ -11,6 +11,7 @@ import html as html_module
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +38,14 @@ class NotificationMonitor:
         self.on_update = on_update
         self.GLib = None
         self.seen: dict[str, int] = {}
+        self.startup = False
+        self.startup_started = 0.0
+        self.startup_pending: dict[str, dict[str, Any]] = {}
         self.test_seq = 0
         self.stopped = False
         self.notify = None
         self.active = []
+        self.sound_error = ""
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -53,6 +58,9 @@ class NotificationMonitor:
             self.app.log(f"notifications unavailable: {exc!r}")
             return
         self._baseline()
+        self.startup = True
+        self.startup_started = time.monotonic()
+        self.startup_pending = {}
         self.test_seq = self._test_seq()
         self.GLib.timeout_add(2000, self._tick)
 
@@ -104,6 +112,9 @@ class NotificationMonitor:
                 self.seen[self._key(thread)] = int(
                     thread.get("last_date") or 0
                 )
+            if self.startup:
+                self.startup = False
+                self.startup_pending = {}
             return True
 
         fresh = []
@@ -112,39 +123,88 @@ class NotificationMonitor:
             stamp = int(thread.get("last_date") or 0)
             if stamp > self.seen.get(key, -1):
                 fresh.append(thread)
+        if fresh:
+            for thread in fresh:
+                self.seen[self._key(thread)] = int(
+                    thread.get("last_date") or 0
+                )
+        if self.startup:
+            for thread in fresh:
+                self.startup_pending[self._key(thread)] = thread
+            if self._startup_finished():
+                self._flush_startup(prefs)
+            return True
         if not fresh:
             return True
-        for thread in fresh:
-            self.seen[self._key(thread)] = int(thread.get("last_date") or 0)
         for thread in sorted(
             fresh, key=lambda item: int(item.get("last_date") or 0)
         ):
             self._dispatch(thread, prefs)
         return True
 
+    def _startup_finished(self) -> bool:
+        elapsed = time.monotonic() - self.startup_started
+        if elapsed >= 90:
+            return True
+        try:
+            status = self.app.sync.status()
+        except Exception:
+            return elapsed >= 6
+        if status.get("syncing"):
+            return False
+        if status.get("last_finished"):
+            return elapsed >= 3
+        return elapsed >= 6
+
+    def _flush_startup(self, prefs: dict[str, Any]) -> None:
+        self.startup = False
+        pending = list(self.startup_pending.values())
+        self.startup_pending = {}
+        eligible = [
+            thread for thread in pending if self._eligible(thread, prefs)
+        ]
+        if not eligible:
+            return
+        if len(eligible) == 1:
+            self._dispatch(eligible[0], prefs)
+            return
+        self._send_notification(
+            f"{len(eligible)}+ new notifications",
+            "New mail since Courier was last opened.",
+            prefs,
+            None,
+        )
+
     # ------------------------------------------------------------------ delivery
 
-    def _dispatch(self, thread: dict[str, Any], prefs: dict[str, Any]) -> None:
+    def _eligible(
+        self, thread: dict[str, Any], prefs: dict[str, Any]
+    ) -> dict[str, Any] | None:
         labels = set(thread.get("labels") or [])
         if "INBOX" not in labels and not prefs.get("notifyArchived"):
-            return
+            return None
         if "DRAFT" in labels and "INBOX" not in labels:
-            return
+            return None
         if "SPAM" in labels or "TRASH" in labels:
-            return
+            return None
         if "SENT" in labels and "INBOX" not in labels:
-            return
+            return None
         if not thread.get("unread"):
-            return
+            return None
         account = self.app.store.get_account(thread.get("account_id") or "")
         if not account:
-            return
+            return None
         sender = (
             thread.get("last_from_email")
             or thread.get("sender_email")
             or ""
         ).lower()
         if sender and sender == (account["email"] or "").lower():
+            return None
+        return account
+
+    def _dispatch(self, thread: dict[str, Any], prefs: dict[str, Any]) -> None:
+        if not self._eligible(thread, prefs):
             return
         if prefs.get("aiEnabled") and prefs.get("notifyUseAI") and self.app.ai.configured():
             worker = threading.Thread(
@@ -355,11 +415,13 @@ class NotificationMonitor:
         if sound == "custom":
             configured = str(prefs.get("notifySoundPath") or "").strip()
             if not configured:
+                self._sound_failure("The custom notification sound has no file.")
                 return
             path = Path(configured)
         else:
             path = SOUND_FILES.get(sound, SOFT_KNOCK)
         if not path.exists():
+            self._sound_failure(f"Notification sound is missing: {path}")
             return
         try:
             volume = min(100, max(0, int(prefs.get("notifyVolume", 60))))
@@ -377,7 +439,7 @@ class NotificationMonitor:
                     "-nodisp",
                     "-autoexit",
                     "-loglevel",
-                    "quiet",
+                    "error",
                     "-volume",
                     str(volume),
                     str(path),
@@ -399,17 +461,54 @@ class NotificationMonitor:
             )
         if path.suffix.lower() == ".wav" and shutil.which("aplay"):
             commands.append(["aplay", "-q", str(path)])
+        if not commands:
+            self._sound_failure(
+                "No audio player was found for the notification sound."
+            )
+            return
+        threading.Thread(
+            target=self._play_sound_worker,
+            args=(path, commands),
+            daemon=True,
+            name="courier-sound",
+        ).start()
+
+    def _sound_failure(self, message: str) -> None:
+        if self.sound_error == message:
+            return
+        self.sound_error = message
+        self.app.log(message)
+
+    def _play_sound_worker(self, path: Path, commands: list[list[str]]) -> None:
         for command in commands:
             try:
-                subprocess.Popen(
+                result = subprocess.run(
                     command,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=30,
+                    check=False,
                 )
-                return
-            except Exception:
+            except Exception as exc:
+                self._sound_failure(
+                    f"Notification sound {command[0]} failed: {exc!r}"
+                )
                 continue
+            if result.returncode == 0:
+                if self.sound_error:
+                    self.app.log(
+                        f"Notification sound recovered using {command[0]}."
+                    )
+                self.sound_error = ""
+                return
+            detail = " ".join((result.stderr or "").splitlines()[-2:]).strip()
+            self._sound_failure(
+                f"Notification sound {command[0]} exited "
+                f"{result.returncode}{f': {detail}' if detail else ''}."
+            )
+        self._sound_failure(f"Could not play notification sound {path}.")
 
     # ------------------------------------------------------------------ test
 

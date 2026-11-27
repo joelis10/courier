@@ -160,6 +160,7 @@ const state = {
   },
   settings: {},
   version: "",
+  signatures: {},
   updateChecking: false,
   updateResult: null,
   updateMode: null,
@@ -203,6 +204,11 @@ const state = {
   settingsFocus: null,
   editingAccountId: null,
   accountEditorColor: null,
+  accountEditorSignatureEnabled: false,
+  accountEditorSignatureHtml: "",
+  signatureEditor: null,
+  signatureEditorKeyHandler: null,
+  styledPaperNotified: false,
   focusEmail: false,
   composer: null,
   summary: null,
@@ -2086,6 +2092,128 @@ function draftSignature(draft) {
   ]);
 }
 
+function accountSignatureHtml(accountId) {
+  const account = accountFor(accountId);
+  if (!account || !account.signature_enabled) return "";
+  return String(state.signatures[accountId] || "").trim();
+}
+
+function signatureStartBlockHtml() {
+  return '<div data-composer-body-start="1"><br></div>';
+}
+
+function signatureBlockHtml(accountId, htmlOverride = null) {
+  const html =
+    htmlOverride === null
+      ? accountSignatureHtml(accountId)
+      : String(htmlOverride || "").trim();
+  if (!html) return "";
+  return `<div class="composer-signature" data-courier-signature="${esc(
+    accountId
+  )}">${html}</div>`;
+}
+
+function composerSignatureHtml(composer, accountId) {
+  const account = accountFor(accountId);
+  if (!account || !account.signature_enabled) return "";
+  const overrides = composer?.signatureOverrides || {};
+  if (Object.prototype.hasOwnProperty.call(overrides, accountId)) {
+    return overrides[accountId];
+  }
+  return accountSignatureHtml(accountId);
+}
+
+function composerSignatureBlockHtml(composer, accountId) {
+  return signatureBlockHtml(
+    accountId,
+    composerSignatureHtml(composer, accountId)
+  );
+}
+
+function stripComposerSignatureHtml(html) {
+  const host = document.createElement("div");
+  host.innerHTML = String(html || "");
+  for (const node of host.querySelectorAll("[data-courier-signature]")) {
+    node.remove();
+  }
+  return host.innerHTML;
+}
+
+function emptySignatureStartBlock(node) {
+  return (
+    !node.textContent.trim() &&
+    !node.querySelector("img, table, hr, video, svg, canvas, iframe, object, embed, picture")
+  );
+}
+
+function addComposerSignature(html, accountId) {
+  const clean = stripComposerSignatureHtml(html);
+  const block = signatureBlockHtml(accountId);
+  const host = document.createElement("div");
+  host.innerHTML = clean;
+  if (!block) {
+    for (const start of host.querySelectorAll(
+      "[data-composer-body-start]"
+    )) {
+      if (emptySignatureStartBlock(start)) start.remove();
+    }
+    return host.innerHTML;
+  }
+  const hasStart = Boolean(
+    host.querySelector("[data-composer-body-start]")
+  );
+  return `${clean}${
+    hasStart ? "" : signatureStartBlockHtml()
+  }${block}`;
+}
+
+function ensureComposerSignature(html, accountId) {
+  const block = signatureBlockHtml(accountId);
+  const host = document.createElement("div");
+  host.innerHTML = String(html || "");
+  if (!block) return addComposerSignature(host.innerHTML, accountId);
+  const signatures = Array.from(
+    host.querySelectorAll("[data-courier-signature]")
+  );
+  const existing = signatures.find(
+    (node) => node.dataset.courierSignature === accountId
+  );
+  if (existing) {
+    for (const node of signatures) {
+      if (node !== existing) node.remove();
+    }
+    if (!host.querySelector("[data-composer-body-start]")) {
+      const start = document.createElement("div");
+      start.setAttribute("data-composer-body-start", "1");
+      start.innerHTML = "<br>";
+      existing.parentNode.insertBefore(start, existing);
+    }
+    return host.innerHTML;
+  }
+  return addComposerSignature(host.innerHTML, accountId);
+}
+
+function composerHasUserContent(editor) {
+  if (!editor) return false;
+  const clone = editor.cloneNode(true);
+  for (const node of clone.querySelectorAll("[data-courier-signature]")) {
+    node.remove();
+  }
+  for (const node of clone.querySelectorAll(
+    "[data-composer-body-start]"
+  )) {
+    for (const br of node.querySelectorAll("br")) br.remove();
+  }
+  return (
+    clone.textContent.trim().length > 0 ||
+    Boolean(
+      clone.querySelector(
+        "img, table, hr, video, svg, canvas, iframe, object, embed, picture"
+      )
+    )
+  );
+}
+
 function composerDraftSignatureFromForm(composer) {
   const form = $("#composer .composer-form");
   const editor = $(".composer-editor", form);
@@ -2117,6 +2245,7 @@ function primeComposerDraftBaseline(composer) {
 }
 
 const COMPOSER_MIME_LIMIT = 34 * 1024 * 1024;
+const SIGNATURE_BYTES_LIMIT = 6 * 1024 * 1024;
 
 function formatComposerSize(bytes) {
   const value = Math.max(0, Number(bytes) || 0);
@@ -2710,6 +2839,7 @@ function renderComposer() {
   clearComposerImageSelection();
   closeContactMenu();
   if (!composer) {
+    stopComposerPaperObserver();
     host.hidden = true;
     host.innerHTML = "";
     host.className = "composer";
@@ -2721,6 +2851,7 @@ function renderComposer() {
   host.classList.toggle("minimized", Boolean(composer.minimized));
   host.innerHTML = composerHtml(composer);
   host.dataset.kind = composer.kind;
+  observeComposerPaper();
   renderComposerAttachments();
   updateComposerSize(composer);
   updateReaderPane();
@@ -2731,7 +2862,7 @@ function renderComposer() {
         composer.initialized = true;
         editor.focus();
         if (composer.kind === "reply" || composer.kind === "reply-all") {
-          placeCaretAtEnd(editor);
+          placeCaretBeforeSignature(editor);
         }
         if (composer.kind === "forward" || composer.kind === "new") {
           const to = $(".composer-to", host);
@@ -2753,6 +2884,256 @@ function placeCaretAtEnd(element) {
   } catch (error) {
     /* Ignore. */
   }
+}
+
+function placeCaretBeforeSignature(element) {
+  const signature = element?.querySelector("[data-courier-signature]");
+  if (!signature) {
+    placeCaretAtEnd(element);
+    return;
+  }
+  try {
+    const range = document.createRange();
+    const start = signature.previousElementSibling;
+    if (start?.matches("[data-composer-body-start]")) {
+      range.selectNodeContents(start);
+      range.collapse(true);
+    } else {
+      range.setStartBefore(signature);
+      range.collapse(true);
+    }
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } catch (error) {
+    placeCaretAtEnd(element);
+  }
+}
+
+function ensureComposerCaretBeforeSignature(editor) {
+  const signature = editor?.querySelector("[data-courier-signature]");
+  if (!signature) return;
+  const selection = window.getSelection();
+  if (!selection || !selection.rangeCount) return;
+  const range = selection.getRangeAt(0);
+  if (!range.collapsed) return;
+  if (signature.contains(range.startContainer)) return;
+  let after = false;
+  if (range.startContainer === editor) {
+    const index = Array.from(editor.childNodes).indexOf(signature);
+    after = index >= 0 && range.startOffset > index;
+  } else {
+    const position = signature.compareDocumentPosition(range.startContainer);
+    after = Boolean(position & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+  if (after) placeCaretBeforeSignature(editor);
+}
+
+const EDITOR_STYLED_TAGS = new Set([
+  "A",
+  "B",
+  "BLOCKQUOTE",
+  "CANVAS",
+  "CENTER",
+  "CODE",
+  "DEL",
+  "EM",
+  "EMBED",
+  "FONT",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "HR",
+  "I",
+  "IFRAME",
+  "IMG",
+  "INS",
+  "LI",
+  "LINK",
+  "MARK",
+  "OBJECT",
+  "OL",
+  "PICTURE",
+  "PRE",
+  "S",
+  "SMALL",
+  "STRIKE",
+  "STRONG",
+  "STYLE",
+  "SUB",
+  "SUP",
+  "SVG",
+  "TABLE",
+  "TBODY",
+  "TD",
+  "TFOOT",
+  "TH",
+  "THEAD",
+  "TR",
+  "U",
+  "UL",
+  "VIDEO",
+]);
+
+const EDITOR_STYLED_ATTRS = new Set([
+  "align",
+  "background",
+  "bgcolor",
+  "color",
+  "face",
+  "size",
+  "style",
+]);
+
+function contentHasStyledMarkup(root) {
+  if (!root) return false;
+  const walk = (node) => {
+    if (node.nodeType !== 1) return false;
+    if (node !== root && !node.hasAttribute("data-courier-signature")) {
+      if (EDITOR_STYLED_TAGS.has(node.tagName)) return true;
+      for (const attr of node.attributes) {
+        const name = attr.name.toLowerCase();
+        if (EDITOR_STYLED_ATTRS.has(name)) return true;
+        if (name === "class" && attr.value.trim()) return true;
+      }
+    }
+    for (const child of node.children) {
+      if (walk(child)) return true;
+    }
+    return false;
+  };
+  return walk(root);
+}
+
+function selectedContentTheme() {
+  return EMAIL_THEMES[state.prefs.emailTheme]
+    ? state.prefs.emailTheme
+    : "fog";
+}
+
+function applyEditorPaperPalette(element, themeName) {
+  if (!element) return;
+  const palette = EMAIL_THEMES[themeName] || EMAIL_THEMES.fog;
+  element.style.setProperty("--editor-paper-bg", palette.bg);
+  element.style.setProperty("--editor-paper-ink", palette.ink);
+  element.style.setProperty("--editor-paper-muted", palette.muted);
+  element.style.setProperty("--editor-paper-line", palette.line);
+  element.style.setProperty("--editor-paper-link", palette.link);
+  element.style.colorScheme = palette.scheme || "light";
+  element.classList.add("editor-paper");
+  element.dataset.editorPaperTheme = themeName;
+}
+
+function maybeToastStyledPaper(styled) {
+  if (!styled || state.styledPaperNotified) return;
+  if (selectedContentTheme() === "fog") return;
+  state.styledPaperNotified = true;
+  toast(
+    "Styling detected. Changed background to match what the recipient would see.",
+    false,
+    6000
+  );
+}
+
+function updateComposerPaperTheme() {
+  const editor = $("#composer .composer-editor");
+  const wrap = $("#composer .editor-wrap");
+  if (!editor || !wrap) return;
+  const styled = contentHasStyledMarkup(editor);
+  applyEditorPaperPalette(wrap, styled ? "fog" : selectedContentTheme());
+  wrap.classList.toggle(
+    "show-composer-placeholder",
+    Boolean(editor.querySelector("[data-courier-signature]")) &&
+      !composerHasUserContent(editor)
+  );
+  maybeToastStyledPaper(styled);
+}
+
+function updateSignaturePaperTheme() {
+  const editor = signatureEditorElement();
+  const paper = $("#signature-editor-modal .signature-paper");
+  if (!editor || !paper) return;
+  const styled = contentHasStyledMarkup(editor);
+  applyEditorPaperPalette(paper, styled ? "fog" : selectedContentTheme());
+  maybeToastStyledPaper(styled);
+}
+
+let composerPaperObserver = null;
+let signaturePaperObserver = null;
+let composerPaperFrame = 0;
+let signaturePaperFrame = 0;
+
+function scheduleComposerPaperTheme() {
+  if (composerPaperFrame) return;
+  composerPaperFrame = requestAnimationFrame(() => {
+    composerPaperFrame = 0;
+    updateComposerPaperTheme();
+  });
+}
+
+function scheduleSignaturePaperTheme() {
+  if (signaturePaperFrame) return;
+  signaturePaperFrame = requestAnimationFrame(() => {
+    signaturePaperFrame = 0;
+    updateSignaturePaperTheme();
+  });
+}
+
+function stopComposerPaperObserver() {
+  if (composerPaperObserver) {
+    composerPaperObserver.disconnect();
+    composerPaperObserver = null;
+  }
+  if (composerPaperFrame) {
+    cancelAnimationFrame(composerPaperFrame);
+    composerPaperFrame = 0;
+  }
+}
+
+function stopSignaturePaperObserver() {
+  if (signaturePaperObserver) {
+    signaturePaperObserver.disconnect();
+    signaturePaperObserver = null;
+  }
+  if (signaturePaperFrame) {
+    cancelAnimationFrame(signaturePaperFrame);
+    signaturePaperFrame = 0;
+  }
+}
+
+function observeComposerPaper() {
+  stopComposerPaperObserver();
+  const editor = $("#composer .composer-editor");
+  if (!editor) return;
+  if (typeof MutationObserver !== "undefined") {
+    composerPaperObserver = new MutationObserver(scheduleComposerPaperTheme);
+    composerPaperObserver.observe(editor, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+  }
+  updateComposerPaperTheme();
+}
+
+function observeSignaturePaper() {
+  stopSignaturePaperObserver();
+  const editor = signatureEditorElement();
+  if (!editor) return;
+  if (typeof MutationObserver !== "undefined") {
+    signaturePaperObserver = new MutationObserver(scheduleSignaturePaperTheme);
+    signaturePaperObserver.observe(editor, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+  }
+  updateSignaturePaperTheme();
 }
 
 function renderComposerAttachments() {
@@ -2881,6 +3262,7 @@ function openComposer(kind, options = {}) {
     if (draftSubject) subject = draftSubject;
     html = draft.html || html;
   }
+  html = ensureComposerSignature(html, accountId);
 
   const hasThread = Boolean(thread);
   let mode = hasThread ? state.prefs.composerMode : "full";
@@ -2931,6 +3313,8 @@ function openComposer(kind, options = {}) {
     draftQueued: false,
     createdDraft: false,
     attachmentShelfCollapsed: false,
+    signatureOverrides: {},
+    lastSelection: null,
     initialSignature: "",
     error: "",
   };
@@ -3651,7 +4035,7 @@ async function prepareComposerImages(editor, options = {}) {
   }
 }
 
-function composerOutgoing(editor, composer) {
+function composerOutgoing(editor, composer, options = {}) {
   const html = editor.innerHTML.trim();
   const text = editor.innerText.trim();
   const outgoing = document.createElement("div");
@@ -3663,6 +4047,18 @@ function composerOutgoing(editor, composer) {
     usedInline.add(cid);
     image.setAttribute("src", `cid:${cid}`);
     image.removeAttribute("data-courier-cid");
+  }
+  if (options.forSend) {
+    for (const start of outgoing.querySelectorAll(
+      "[data-composer-body-start]"
+    )) {
+      start.removeAttribute("data-composer-body-start");
+    }
+    for (const wrapper of outgoing.querySelectorAll(
+      "[data-courier-signature]"
+    )) {
+      wrapper.replaceWith(...Array.from(wrapper.childNodes));
+    }
   }
   const attachments = (composer.attachments || []).filter(
     (item) => !item.inline || usedInline.has(item.content_id)
@@ -3689,7 +4085,7 @@ async function sendComposer() {
   }
   await prepareComposerImages(editor, { announce: true });
   adoptDataImages(editor, composer);
-  const outgoing = composerOutgoing(editor, composer);
+  const outgoing = composerOutgoing(editor, composer, { forSend: true });
   const errorHost = $(".composer-error", form);
   const button = $(".send-btn", form);
   const account = accountFor(composer.accountId);
@@ -3933,9 +4329,56 @@ async function sendComposer() {
 
 function updateComposerAccount(accountId) {
   if (!state.composer) return;
+  const composer = state.composer;
+  const editor = $("#composer .composer-editor");
+  const previousAccountId = composer.accountId;
   captureComposerFields();
-  state.composer.accountId = accountId;
-  renderComposer();
+  if (editor) {
+    for (const wrapper of editor.querySelectorAll(
+      "[data-courier-signature]"
+    )) {
+      if (wrapper.dataset.courierSignature === previousAccountId) {
+        composer.signatureOverrides[previousAccountId] =
+          wrapper.innerHTML;
+      }
+      wrapper.remove();
+    }
+  }
+  composer.accountId = accountId;
+  const block = composerSignatureBlockHtml(composer, accountId);
+  if (editor) {
+    const hasStart = Boolean(
+      editor.querySelector("[data-composer-body-start]")
+    );
+    if (block) {
+      editor.insertAdjacentHTML(
+        "beforeend",
+        `${hasStart ? "" : signatureStartBlockHtml()}${block}`
+      );
+    } else {
+      for (const start of editor.querySelectorAll(
+        "[data-composer-body-start]"
+      )) {
+        if (emptySignatureStartBlock(start)) start.remove();
+      }
+    }
+    composer.html = editor.innerHTML;
+    editor.focus({ preventScroll: true });
+    const selection = window.getSelection();
+    let restored = false;
+    if (composer.lastSelection) {
+      try {
+        selection.removeAllRanges();
+        selection.addRange(composer.lastSelection);
+        restored = true;
+      } catch (error) {
+        /* The old caret was inside the removed signature. */
+      }
+    }
+    if (!restored) placeCaretBeforeSignature(editor);
+  }
+  observeComposerPaper();
+  updateComposerSize(composer);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -4700,6 +5143,22 @@ function accountEditorHtml(account) {
       <button class="btn" data-action="account-edit-cancel">Cancel</button>
       <span class="settings-status" id="account-editor-status" aria-live="polite"></span>
     </div>
+    <div class="account-signature-divider" aria-hidden="true"></div>
+    <div class="pref-row">
+      <div class="pref-row-label">Signature</div>
+      <label class="switch"><input id="account-signature-toggle" type="checkbox" aria-label="Use a signature for this account" ${
+        state.accountEditorSignatureEnabled ? "checked" : ""
+      }><span class="switch-track"><span class="switch-knob"></span></span></label>
+    </div>
+    <p class="settings-note">Added below the message text in new messages and replies from this account. Images are sent inline.</p>
+    <div class="settings-actions" id="account-signature-actions" ${
+      state.accountEditorSignatureEnabled ? "" : "hidden"
+    }>
+      <button type="button" class="btn" data-action="account-signature-edit" data-account="${esc(
+        account.id
+      )}">Signature editor</button>
+      <span class="settings-status" id="account-signature-status" aria-live="polite"></span>
+    </div>
   </div>`;
 }
 
@@ -4774,8 +5233,13 @@ async function saveAccountEditor() {
     state.accounts = data.state.accounts || state.accounts;
     state.counts = data.state.counts || state.counts;
     state.views = data.state.views || state.views;
+    if (data.signature_html !== undefined) {
+      state.signatures[accountId] = data.signature_html;
+    }
     state.editingAccountId = null;
     state.accountEditorColor = null;
+    state.accountEditorSignatureEnabled = false;
+    state.accountEditorSignatureHtml = "";
     renderSidebar();
     renderSettings();
     renderList();
@@ -4784,6 +5248,898 @@ async function saveAccountEditor() {
       status.textContent = error.message || "Could not save the account.";
       status.classList.add("error");
     }
+  }
+}
+
+function purifySignatureHtml(html) {
+  const value = String(html || "").trim();
+  if (!value) return "";
+  if (window.DOMPurify) {
+    return window.DOMPurify.sanitize(value, {
+      ADD_ATTR: ["target", "style", "width", "height", "align"],
+      ALLOW_DATA_ATTR: true,
+      FORBID_TAGS: [
+        "script",
+        "iframe",
+        "object",
+        "embed",
+        "form",
+        "meta",
+        "style",
+        "link",
+      ],
+      FORBID_ATTR: ["contenteditable"],
+    });
+  }
+  return `<p>${esc(value.replace(/<[^>]*>/g, " "))}</p>`;
+}
+
+function signatureFormatBarHtml() {
+  return `
+    <button type="button" class="format-btn" data-signature-format="undo" aria-label="Undo" title="Undo (Ctrl+Z)">${icon(
+      "undo",
+      14
+    )}</button>
+    <button type="button" class="format-btn" data-signature-format="redo" aria-label="Redo" title="Redo (Ctrl+Shift+Z)">${icon(
+      "redo",
+      14
+    )}</button>
+    <span class="toolbar-divider" aria-hidden="true"></span>
+    <button type="button" class="format-btn" data-signature-format="bold" aria-label="Bold" title="Bold">${icon(
+      "bold",
+      14
+    )}</button>
+    <button type="button" class="format-btn" data-signature-format="italic" aria-label="Italic" title="Italic">${icon(
+      "italic",
+      14
+    )}</button>
+    <button type="button" class="format-btn" data-signature-format="underline" aria-label="Underline" title="Underline">${icon(
+      "underline",
+      14
+    )}</button>
+    <button type="button" class="format-btn" data-signature-format="insertUnorderedList" aria-label="Bulleted list" title="Bulleted list">${icon(
+      "list",
+      14
+    )}</button>
+    <button type="button" class="format-btn" data-signature-format="createLink" aria-label="Insert link" title="Insert link">${icon(
+      "link",
+      14
+    )}</button>
+    <button type="button" class="format-btn" data-signature-action="inline-image" aria-label="Insert image" title="Insert image">${icon(
+      "image",
+      14
+    )}</button>`;
+}
+
+function signatureEditorModalHtml(account) {
+  return `<div class="modal-backdrop" data-action="signature-cancel"></div>
+    <div class="modal-sheet signature-modal" id="signature-editor-modal" role="dialog" aria-modal="true" aria-labelledby="signature-editor-title">
+      <h2 class="modal-title" id="signature-editor-title">Signature editor for ${esc(
+        account.email
+      )}</h2>
+      <p class="modal-text">Automatically added below message content in the composer when this account is chosen.</p>
+      <div class="signature-paper">
+        <div class="editor-wrap signature-editor-wrap">
+          <div class="signature-sample" aria-hidden="true">
+            <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Integer posuere erat a ante venenatis dapibus posuere velit aliquet.</p>
+            <p>Donec ullamcorper nulla non metus auctor fringilla. Cras mattis consectetur purus sit amet fermentum.</p>
+          </div>
+          <div class="composer-editor signature-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Signature goes here...">${
+            state.accountEditorSignatureHtml || ""
+          }</div>
+        </div>
+      </div>
+      <div class="format-bar signature-format-bar">${signatureFormatBarHtml()}</div>
+      <input type="file" class="signature-inline-image" accept="image/*" hidden>
+      <div class="signature-link-row" hidden>
+        <input class="signature-link-input" type="text" autocomplete="off" spellcheck="false" placeholder="https://" aria-label="Link URL">
+        <button type="button" class="btn" data-action="signature-link-insert">Insert</button>
+        <button type="button" class="btn ghost" data-action="signature-link-cancel">Cancel</button>
+      </div>
+      <p class="signature-error" id="signature-editor-error" aria-live="polite"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-action="signature-cancel">Cancel</button>
+        <button type="button" class="btn accent" data-action="signature-save">Save signature</button>
+      </div>
+    </div>`;
+}
+
+function signatureEditorElement() {
+  return $("#signature-editor-modal .signature-editor");
+}
+
+function signatureEditorWrap() {
+  return $("#signature-editor-modal .signature-editor-wrap");
+}
+
+function setSignatureEditorStatus(message, error = false) {
+  const host = $("#signature-editor-error");
+  if (!host) return;
+  host.textContent = message || "";
+  host.classList.toggle("error", Boolean(error));
+}
+
+function openSignatureEditor() {
+  const account = accountFor(state.editingAccountId);
+  if (!account) return;
+  closeSignatureEditor();
+  state.signatureEditor = {
+    accountId: account.id,
+    html: state.accountEditorSignatureHtml || "",
+    initialHtml: state.accountEditorSignatureHtml || "",
+    selectedImage: null,
+    contextImage: null,
+    imageRange: null,
+    linkRange: null,
+    selectionRange: null,
+    saving: false,
+    confirming: false,
+    keyHandler: null,
+  };
+  const root = $("#modal-root");
+  if (!root) return;
+  state.modalOpen = true;
+  root.hidden = false;
+  root.innerHTML = signatureEditorModalHtml(account);
+  const modal = $("#signature-editor-modal", root);
+  if (!modal) return;
+  modal.addEventListener("mousedown", (event) => {
+    if (event.target.closest(".format-btn")) {
+      event.preventDefault();
+      saveSignatureSelection();
+    }
+  });
+  modal.addEventListener("click", handleSignatureModalClick);
+  modal.addEventListener(
+    "pointerdown",
+    (event) => {
+      const editor = signatureEditorElement();
+      if (!editor || !state.signatureEditor?.selectedImage) return;
+      if (event.target.closest(".signature-image-tools")) return;
+      if (event.target.closest(".signature-editor img")) return;
+      clearSignatureImageSelection();
+    },
+    true
+  );
+  modal.addEventListener("keydown", handleSignatureKeydown, true);
+  modal.addEventListener("input", handleSignatureInput);
+  modal.addEventListener("contextmenu", handleSignatureContextMenu);
+  modal.addEventListener("paste", handleSignaturePaste);
+  const file = $(".signature-inline-image", modal);
+  if (file) {
+    file.addEventListener("change", () => {
+      insertSignatureInlineImage(file.files && file.files[0]);
+      file.value = "";
+    });
+  }
+  observeSignaturePaper();
+  const editor = signatureEditorElement();
+  if (editor && state.signatureEditor) {
+    state.signatureEditor.initialHtml = editor.innerHTML;
+    state.signatureEditor.html = editor.innerHTML;
+  }
+  setTimeout(() => {
+    const editor = signatureEditorElement();
+    if (!editor) return;
+    editor.focus();
+    placeCaretAtEnd(editor);
+  }, 20);
+}
+
+function closeSignatureEditor() {
+  clearSignatureImageSelection();
+  stopSignaturePaperObserver();
+  if (state.signatureEditor) {
+    state.signatureEditor = null;
+  }
+  signatureImageResizeActive = false;
+  document.body.classList.remove("composer-image-resizing");
+  state.modalOpen = false;
+  const root = $("#modal-root");
+  if (root) {
+    root.hidden = true;
+    root.innerHTML = "";
+  }
+}
+
+function signatureEditorDirty() {
+  const editor = signatureEditorElement();
+  return Boolean(
+    state.signatureEditor &&
+      editor &&
+      editor.innerHTML !== state.signatureEditor.initialHtml
+  );
+}
+
+function requestCloseSignatureEditor() {
+  if (!state.signatureEditor) return;
+  if (state.signatureEditor.confirming) return;
+  if (!signatureEditorDirty()) {
+    closeSignatureEditor();
+    return;
+  }
+  showSignatureDiscardConfirm();
+}
+
+function showSignatureDiscardConfirm() {
+  if (!state.signatureEditor || state.signatureEditor.confirming) return;
+  const root = $("#modal-root");
+  if (!root) return;
+  state.signatureEditor.confirming = true;
+  const overlay = document.createElement("div");
+  overlay.className = "signature-discard-overlay";
+  overlay.innerHTML = `<div class="signature-discard-backdrop" data-action="signature-keep-editing"></div>
+    <div class="signature-discard-sheet" role="alertdialog" aria-modal="true" aria-labelledby="signature-discard-title">
+      <h2 class="modal-title" id="signature-discard-title">Discard signature changes?</h2>
+      <p class="modal-text">Your changes will not be saved.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-action="signature-discard">Discard</button>
+        <button type="button" class="btn accent" data-action="signature-keep-editing">Return to editor</button>
+      </div>
+    </div>`;
+  root.appendChild(overlay);
+  setTimeout(() => {
+    $("[data-action='signature-keep-editing']", overlay)?.focus();
+  }, 0);
+}
+
+function hideSignatureDiscardConfirm() {
+  const overlay = $(".signature-discard-overlay");
+  if (overlay) overlay.remove();
+  if (state.signatureEditor) state.signatureEditor.confirming = false;
+  const editor = signatureEditorElement();
+  if (editor) editor.focus();
+}
+
+function saveSignatureSelection() {
+  const editor = signatureEditorElement();
+  if (!editor || !state.signatureEditor) return;
+  const selection = window.getSelection();
+  if (
+    selection &&
+    selection.rangeCount &&
+    editor.contains(selection.anchorNode)
+  ) {
+    state.signatureEditor.selectionRange =
+      selection.getRangeAt(0).cloneRange();
+  } else {
+    state.signatureEditor.selectionRange = null;
+  }
+}
+
+function handleSignatureModalClick(event) {
+  const editor = signatureEditorElement();
+  if (!editor) return;
+  if (Date.now() < signatureImageClickGuard) {
+    event.preventDefault();
+    return;
+  }
+  if (event.target.closest(".signature-sample")) {
+    event.preventDefault();
+    event.stopPropagation();
+    toast("This is example text and will not be part of the signature.");
+    return;
+  }
+  const format = event.target.closest("[data-signature-format]");
+  if (format) {
+    event.preventDefault();
+    event.stopPropagation();
+    applySignatureFormat(format.dataset.signatureFormat, true);
+    return;
+  }
+  const action = event.target.closest("[data-signature-action]");
+  if (action) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (action.dataset.signatureAction === "inline-image") {
+      void chooseSignatureInlineImage();
+    }
+    return;
+  }
+  const image = event.target.closest(".signature-editor img");
+  if (image) {
+    event.preventDefault();
+    selectSignatureImage(image);
+    return;
+  }
+  if (
+    !event.target.closest(".signature-image-tools") &&
+    !event.target.closest(".modal-actions") &&
+    !event.target.closest(".signature-link-row")
+  ) {
+    clearSignatureImageSelection();
+  }
+}
+
+function handleSignatureKeydown(event) {
+  if (event.key === "Escape") {
+    const discard = $(".signature-discard-overlay");
+    if (discard) {
+      event.preventDefault();
+      event.stopPropagation();
+      hideSignatureDiscardConfirm();
+      return;
+    }
+    const linkRow = $(".signature-link-row");
+    if (linkRow && !linkRow.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      hideSignatureLinkRow();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    requestCloseSignatureEditor();
+    return;
+  }
+  if (
+    event.target.closest?.(".signature-editor") &&
+    (event.ctrlKey || event.metaKey) &&
+    !event.altKey
+  ) {
+    const key = event.key.toLowerCase();
+    if (key === "z") {
+      event.preventDefault();
+      event.stopPropagation();
+      applySignatureFormat(event.shiftKey ? "redo" : "undo", false);
+      return;
+    }
+    if (key === "y") {
+      event.preventDefault();
+      event.stopPropagation();
+      applySignatureFormat("redo", false);
+      return;
+    }
+  }
+  if (
+    event.key === "Enter" &&
+    event.target.matches?.(".signature-link-input")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    insertSignatureLink();
+    return;
+  }
+  if (
+    state.signatureEditor?.selectedImage &&
+    event.target.closest?.(".signature-editor") &&
+    !["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(event.key)
+  ) {
+    clearSignatureImageSelection();
+  }
+}
+
+function handleSignatureInput(event) {
+  if (!state.signatureEditor) return;
+  if (event.target.closest?.(".signature-editor")) {
+    if (state.signatureEditor.selectedImage) clearSignatureImageSelection();
+    state.signatureEditor.html =
+      event.target.closest(".signature-editor").innerHTML;
+  }
+}
+
+function handleSignatureContextMenu(event) {
+  const image = event.target.closest?.(".signature-editor img");
+  if (!image) return;
+  event.preventDefault();
+  openSignatureImageContextMenu(image, event.clientX, event.clientY);
+}
+
+async function handleSignaturePaste(event) {
+  const editor = signatureEditorElement();
+  if (!editor) return;
+  const files = [];
+  for (const item of Array.from(event.clipboardData?.items || [])) {
+    if (!item.type.startsWith("image/")) continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  if (!files.length) return;
+  event.preventDefault();
+  saveSignatureImageRange();
+  for (const file of files) await insertSignatureInlineImage(file);
+}
+
+function applySignatureFormat(command, restoreSelection = false) {
+  const editor = signatureEditorElement();
+  if (!editor) return;
+  if (command === "createLink") {
+    openSignatureLinkRow();
+    return;
+  }
+  editor.focus();
+  if (restoreSelection && state.signatureEditor?.selectionRange) {
+    try {
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(state.signatureEditor.selectionRange);
+    } catch (error) {
+      /* Ignore a stale selection. */
+    }
+  }
+  document.execCommand(command, false, null);
+  if (state.signatureEditor) state.signatureEditor.html = editor.innerHTML;
+}
+
+function openSignatureLinkRow() {
+  const editor = signatureEditorElement();
+  const row = $(".signature-link-row");
+  const input = $(".signature-link-input");
+  if (!editor || !row || !input) return;
+  const selection = window.getSelection();
+  if (
+    selection &&
+    selection.rangeCount &&
+    editor.contains(selection.anchorNode)
+  ) {
+    state.signatureEditor.linkRange = selection.getRangeAt(0).cloneRange();
+  } else {
+    state.signatureEditor.linkRange = null;
+  }
+  row.hidden = false;
+  input.value = "";
+  input.focus();
+}
+
+function hideSignatureLinkRow() {
+  const row = $(".signature-link-row");
+  if (row) row.hidden = true;
+  if (state.signatureEditor) state.signatureEditor.linkRange = null;
+}
+
+function insertSignatureLink() {
+  const input = $(".signature-link-input");
+  const editor = signatureEditorElement();
+  if (!input || !editor || !state.signatureEditor) return;
+  let href = input.value.trim();
+  if (!href || /^javascript:/i.test(href)) return;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(href)) href = `https://${href}`;
+  editor.focus();
+  const range = state.signatureEditor.linkRange;
+  if (range) {
+    try {
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch (error) {
+      /* Ignore stale selections. */
+    }
+  }
+  document.execCommand("createLink", false, href);
+  state.signatureEditor.html = editor.innerHTML;
+  hideSignatureLinkRow();
+}
+
+function saveSignatureImageRange() {
+  const editor = signatureEditorElement();
+  if (!editor || !state.signatureEditor) return;
+  const selection = window.getSelection();
+  if (
+    selection &&
+    selection.rangeCount &&
+    editor.contains(selection.anchorNode)
+  ) {
+    state.signatureEditor.imageRange = selection.getRangeAt(0).cloneRange();
+  } else {
+    state.signatureEditor.imageRange = null;
+  }
+}
+
+async function chooseSignatureInlineImage() {
+  if (!state.signatureEditor) return;
+  saveSignatureImageRange();
+  try {
+    const data = await api("/api/choose-inline-image", {
+      method: "POST",
+      body: {},
+    });
+    const file = data && data.file;
+    if (!file || !file.data) return;
+    const binary = atob(file.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    await insertSignatureInlineImage(
+      new File([bytes], file.filename || "inline-image", {
+        type: file.mime || "image/png",
+      })
+    );
+  } catch (error) {
+    if (error.status === 503) {
+      $("#signature-editor-modal .signature-inline-image")?.click();
+      return;
+    }
+    setSignatureEditorStatus(
+      error.message || "Could not choose an image.",
+      true
+    );
+  }
+}
+
+function insertSignatureInlineImage(file) {
+  if (!file) return;
+  if (!file.type || !file.type.startsWith("image/")) {
+    setSignatureEditorStatus("Choose an image file.", true);
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    setSignatureEditorStatus(
+      "Signature images must be smaller than 10 MB.",
+      true
+    );
+    return;
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const editor = signatureEditorElement();
+      if (!editor || !state.signatureEditor) {
+        resolve();
+        return;
+      }
+      const dataUrl = String(reader.result || "");
+      const image = document.createElement("img");
+      image.src = dataUrl;
+      image.alt = file.name || "Signature image";
+      image.style.maxWidth = "100%";
+      const range = state.signatureEditor.imageRange;
+      if (range && editor.contains(range.commonAncestorContainer)) {
+        range.deleteContents();
+        range.insertNode(image);
+        range.setStartAfter(image);
+        range.collapse(true);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } else {
+        editor.appendChild(image);
+      }
+      state.signatureEditor.imageRange = null;
+      state.signatureEditor.html = editor.innerHTML;
+      selectSignatureImage(image);
+      resolve();
+    };
+    reader.onerror = () => {
+      setSignatureEditorStatus("Could not read the image.", true);
+      resolve();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+let signatureImageResizeActive = false;
+let signatureImageClickGuard = 0;
+
+function ensureSignatureImageTools() {
+  const wrap = signatureEditorWrap();
+  if (!wrap) return null;
+  let tools = $(".signature-image-tools", wrap);
+  if (tools) return tools;
+  tools = document.createElement("div");
+  tools.className = "composer-image-tools signature-image-tools";
+  tools.hidden = true;
+  tools.innerHTML = `
+    <button type="button" class="composer-image-handle" data-corner="nw" aria-label="Resize image from top left" title="Resize"></button>
+    <button type="button" class="composer-image-handle" data-corner="ne" aria-label="Resize image from top right" title="Resize"></button>
+    <button type="button" class="composer-image-handle" data-corner="sw" aria-label="Resize image from bottom left" title="Resize"></button>
+    <button type="button" class="composer-image-handle" data-corner="se" aria-label="Resize image from bottom right" title="Resize"></button>
+    <div class="composer-image-actions" role="group" aria-label="Image size">
+      <button type="button" class="composer-image-action" data-image-size="small">Small</button>
+      <button type="button" class="composer-image-action" data-image-size="original">Original Size</button>
+    </div>`;
+  wrap.appendChild(tools);
+  tools.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest?.(".composer-image-handle");
+    if (!handle) return;
+    startSignatureImageResize(event, handle.dataset.corner || "se");
+  });
+  tools.addEventListener("click", (event) => {
+    const button = event.target.closest?.(".composer-image-action");
+    if (!button || !state.signatureEditor?.selectedImage) return;
+    event.preventDefault();
+    const image = state.signatureEditor.selectedImage;
+    const natural = image.naturalWidth || composerImageWidth(image);
+    const target =
+      button.dataset.imageSize === "original"
+        ? natural
+        : Math.min(200, natural || 200);
+    setSignatureImageWidth(image, target);
+  });
+  wrap.addEventListener(
+    "scroll",
+    () => {
+      if (state.signatureEditor?.selectedImage) {
+        positionSignatureImageTools();
+      }
+    },
+    { passive: true }
+  );
+  return tools;
+}
+
+function positionSignatureImageTools() {
+  const image = state.signatureEditor?.selectedImage;
+  const wrap = signatureEditorWrap();
+  const tools = $("#signature-editor-modal .signature-image-tools");
+  const editor = signatureEditorElement();
+  if (!state.signatureEditor || !image || !image.isConnected || !wrap || !tools) {
+    if (tools) tools.hidden = true;
+    if (state.signatureEditor) state.signatureEditor.selectedImage = null;
+    if (editor) editor.classList.remove("has-image-tools");
+    return;
+  }
+  const wrapRect = wrap.getBoundingClientRect();
+  const rect = image.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) {
+    tools.hidden = true;
+    if (editor) editor.classList.remove("has-image-tools");
+    return;
+  }
+  tools.hidden = false;
+  tools.style.left = `${rect.left - wrapRect.left + wrap.scrollLeft}px`;
+  tools.style.top = `${rect.top - wrapRect.top + wrap.scrollTop}px`;
+  tools.style.width = `${rect.width}px`;
+  tools.style.height = `${rect.height}px`;
+  const actions = $(".composer-image-actions", tools);
+  if (actions) {
+    const actionWidth = actions.offsetWidth || 0;
+    if (rect.left + actionWidth > wrapRect.right - 6) {
+      actions.style.left = "auto";
+      actions.style.right = "0";
+    } else {
+      actions.style.left = "0";
+      actions.style.right = "auto";
+    }
+  }
+  if (editor) editor.classList.add("has-image-tools");
+}
+
+function revealSignatureImageTools() {
+  const wrap = signatureEditorWrap();
+  const image = state.signatureEditor?.selectedImage;
+  const tools = $("#signature-editor-modal .signature-image-tools");
+  if (!wrap || !image || !tools || tools.hidden) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const imageRect = image.getBoundingClientRect();
+  const actions = $(".composer-image-actions", tools);
+  const actionRect = actions ? actions.getBoundingClientRect() : imageRect;
+  const top = Math.min(imageRect.top, actionRect.top);
+  const bottom = Math.max(imageRect.bottom, actionRect.bottom);
+  if (imageRect.height >= wrapRect.height - 20) {
+    wrap.scrollTop += Math.max(0, bottom - wrapRect.bottom + 4);
+    return;
+  }
+  if (bottom > wrapRect.bottom - 4) {
+    wrap.scrollTop += bottom - wrapRect.bottom + 4;
+  }
+  if (top < wrapRect.top + 4) {
+    wrap.scrollTop -= wrapRect.top + 4 - top;
+  }
+}
+
+function selectSignatureImage(image) {
+  const editor = signatureEditorElement();
+  if (!state.signatureEditor || !editor || !image || !editor.contains(image)) {
+    return;
+  }
+  state.signatureEditor.selectedImage = image;
+  ensureSignatureImageTools();
+  positionSignatureImageTools();
+  window.requestAnimationFrame(() => {
+    if (state.signatureEditor?.selectedImage === image) {
+      positionSignatureImageTools();
+      revealSignatureImageTools();
+    }
+  });
+  if (!image.complete) {
+    image.addEventListener("load", positionSignatureImageTools, {
+      once: true,
+    });
+  }
+}
+
+function clearSignatureImageSelection() {
+  if (state.signatureEditor) state.signatureEditor.selectedImage = null;
+  const tools = $("#signature-editor-modal .signature-image-tools");
+  if (tools) tools.hidden = true;
+  const editor = signatureEditorElement();
+  if (editor) editor.classList.remove("has-image-tools");
+}
+
+function setSignatureImageWidth(image, width, reveal = true) {
+  if (!image || !image.isConnected) return;
+  const naturalWidth = image.naturalWidth || 0;
+  const naturalHeight = image.naturalHeight || 0;
+  const floor = Math.min(24, naturalWidth || 24);
+  let target = Math.max(floor, Math.round(Number(width) || 0));
+  if (naturalWidth) target = Math.min(target, naturalWidth);
+  image.style.width = `${target}px`;
+  image.style.height = "auto";
+  image.style.maxWidth = "100%";
+  image.setAttribute("width", String(target));
+  if (naturalWidth && naturalHeight) {
+    image.setAttribute(
+      "height",
+      String(Math.max(1, Math.round((target * naturalHeight) / naturalWidth)))
+    );
+  } else {
+    image.removeAttribute("height");
+  }
+  positionSignatureImageTools();
+  if (reveal) {
+    window.requestAnimationFrame(() => {
+      if (state.signatureEditor?.selectedImage === image) {
+        positionSignatureImageTools();
+        revealSignatureImageTools();
+      }
+    });
+  }
+  const editor = signatureEditorElement();
+  if (editor && state.signatureEditor) {
+    state.signatureEditor.html = editor.innerHTML;
+  }
+}
+
+function signatureContextImage() {
+  const image = state.signatureEditor?.contextImage;
+  const editor = signatureEditorElement();
+  if (!state.signatureEditor || !image || !image.isConnected || !editor) {
+    return null;
+  }
+  return editor.contains(image) ? image : null;
+}
+
+function openSignatureImageContextMenu(image, x, y) {
+  if (!state.signatureEditor || !image || !image.isConnected) return;
+  selectSignatureImage(image);
+  state.signatureEditor.contextImage = image;
+  openMenuAt(x, y, [
+    { label: "Small", action: "signature-image-small", icon: "minimize" },
+    {
+      label: "Original Size",
+      action: "signature-image-original",
+      icon: "maximize",
+    },
+    {
+      label: "Delete image",
+      action: "signature-image-delete",
+      icon: "trash",
+    },
+  ]);
+}
+
+function resizeSignatureContextImage(preset) {
+  const image = signatureContextImage();
+  if (!image) return;
+  const natural = image.naturalWidth || composerImageWidth(image);
+  const target =
+    preset === "original" ? natural : Math.min(200, natural || 200);
+  setSignatureImageWidth(image, target);
+  selectSignatureImage(image);
+}
+
+function deleteSignatureImage(image = signatureContextImage()) {
+  if (!state.signatureEditor || !image) return;
+  if (state.signatureEditor.selectedImage === image) {
+    clearSignatureImageSelection();
+  }
+  image.remove();
+  state.signatureEditor.contextImage = null;
+  const editor = signatureEditorElement();
+  if (editor) state.signatureEditor.html = editor.innerHTML;
+}
+
+function startSignatureImageResize(event, corner) {
+  const image = state.signatureEditor?.selectedImage;
+  if (!image || !image.isConnected) return;
+  const editor = signatureEditorElement();
+  const startX = event.clientX;
+  const startWidth = image.getBoundingClientRect().width;
+  if (!startWidth) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const naturalWidth = image.naturalWidth || startWidth;
+  const available = editor
+    ? Math.max(24, editor.clientWidth - 28)
+    : naturalWidth;
+  const maxWidth = Math.max(
+    startWidth,
+    Math.min(naturalWidth, available)
+  );
+  const handleElement =
+    event.target.closest?.(".composer-image-handle") || null;
+  let hintShown = false;
+  let currentWidth = startWidth;
+  signatureImageResizeActive = true;
+  document.body.classList.add("composer-image-resizing");
+  const move = (moveEvent) => {
+    if (!image.isConnected) return;
+    const delta = moveEvent.clientX - startX;
+    const signed = corner.endsWith("w") ? -delta : delta;
+    const wanted = startWidth + signed;
+    if (wanted <= naturalWidth + 0.5) hintShown = false;
+    if (
+      naturalWidth &&
+      wanted > naturalWidth + 0.5 &&
+      maxWidth >= naturalWidth - 0.5 &&
+      !hintShown
+    ) {
+      const anchor = handleElement
+        ? handleElement.getBoundingClientRect()
+        : null;
+      showCursorHint(
+        "Already at original size",
+        anchor ? anchor.right + 10 : moveEvent.clientX + 12,
+        anchor ? anchor.top + anchor.height / 2 : moveEvent.clientY
+      );
+      hintShown = true;
+    }
+    const next = Math.max(24, Math.min(wanted, maxWidth));
+    if (Math.abs(next - currentWidth) < 0.5) return;
+    currentWidth = next;
+    setSignatureImageWidth(image, next, false);
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    window.removeEventListener("blur", finish);
+    signatureImageResizeActive = false;
+    signatureImageClickGuard = Date.now() + 300;
+    document.body.classList.remove("composer-image-resizing");
+    if (image.isConnected) setSignatureImageWidth(image, currentWidth);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+  window.addEventListener("pointercancel", finish, { once: true });
+  window.addEventListener("blur", finish);
+}
+
+async function saveSignatureEditor() {
+  const editor = signatureEditorElement();
+  if (!editor || !state.signatureEditor || state.signatureEditor.saving) return;
+  const html = purifySignatureHtml(editor.innerHTML);
+  const bytes = new Blob([html]).size;
+  if (bytes > SIGNATURE_BYTES_LIMIT) {
+    setSignatureEditorStatus(
+      `Signature is too large (${formatComposerSize(bytes)}). Use smaller images.`,
+      true
+    );
+    return;
+  }
+  state.signatureEditor.saving = true;
+  setSignatureEditorStatus("Saving signature…");
+  const accountId = state.signatureEditor.accountId;
+  try {
+    const data = await api("/api/accounts/update", {
+      method: "POST",
+      body: {
+        id: accountId,
+        signature_enabled: true,
+        signature_html: html,
+      },
+    });
+    state.accounts = data.state.accounts || state.accounts;
+    state.counts = data.state.counts || state.counts;
+    state.views = data.state.views || state.views;
+    state.signatures[accountId] = String(data.signature_html || "");
+    state.accountEditorSignatureHtml = state.signatures[accountId];
+    state.accountEditorSignatureEnabled = true;
+    const status = $("#account-signature-status");
+    if (status) {
+      status.textContent = state.signatures[accountId].trim()
+        ? "Signature saved"
+        : "Signature cleared";
+      status.classList.remove("error");
+    }
+    closeSignatureEditor();
+  } catch (error) {
+    if (state.signatureEditor) state.signatureEditor.saving = false;
+    setSignatureEditorStatus(
+      error.message || "Could not save the signature.",
+      true
+    );
   }
 }
 
@@ -5304,7 +6660,7 @@ function renderSettings() {
           }><span class="switch-track"><span class="switch-knob"></span></span></label>
         </div>
         <p class="settings-note">Mail without the Inbox label stays quiet unless archived notifications are on.</p>
-        <div class="pref-row">
+        <div class="pref-row notify-sound-row">
           <div class="pref-row-label">Sound</div>
           <div class="notify-sound-field">
             <select id="notify-sound-select" class="settings-select" aria-label="Notification sound">
@@ -5857,6 +7213,20 @@ async function refreshState(options = {}) {
     await refreshSelectedThreadIfNeeded();
   }
   schedulePoll(state.sync.syncing ? 2500 : 5000);
+}
+
+async function loadSignatures(options = {}) {
+  try {
+    const data = await api("/api/signatures");
+    state.signatures =
+      data && typeof data.signatures === "object" ? data.signatures : {};
+    return state.signatures;
+  } catch (error) {
+    if (!options.quiet) {
+      toast(error.message || "Could not load signatures.", true);
+    }
+    return null;
+  }
 }
 
 function schedulePoll(delay = 5000) {
@@ -7301,7 +8671,7 @@ function googleSetupStepContent(step, setup) {
       bullets: [
         "Branding: enter an app name and support email, choose External, add a contact email.",
         "Audience: add every Gmail address you will connect as a Test user.",
-        "Testing apps issue 7-day refresh tokens. Publishing avoids that, but public use may require Google verification.",
+        "Testing apps issue 7-day refresh tokens. Publishing to production avoids that. Verification is free and optional for personal or limited use under 100 users. Reconnect after publishing.",
       ],
       link: "https://console.cloud.google.com/auth/branding",
       linkLabel: "Open Google Auth platform",
@@ -8324,6 +9694,13 @@ async function handleAction(element, event) {
       if (!account) return;
       state.editingAccountId = account.id;
       state.accountEditorColor = account.color;
+      if (!(account.id in state.signatures)) {
+        await loadSignatures({ quiet: true });
+      }
+      state.accountEditorSignatureEnabled = Boolean(account.signature_enabled);
+      state.accountEditorSignatureHtml = String(
+        state.signatures[account.id] || ""
+      );
       openSettings("accounts");
       const pane = $("#settings-pane");
       if (pane) pane.scrollTop = 0;
@@ -8432,6 +9809,13 @@ async function handleAction(element, event) {
       if (!account) return;
       state.editingAccountId = account.id;
       state.accountEditorColor = account.color;
+      if (!(account.id in state.signatures)) {
+        await loadSignatures({ quiet: true });
+      }
+      state.accountEditorSignatureEnabled = Boolean(account.signature_enabled);
+      state.accountEditorSignatureHtml = String(
+        state.signatures[account.id] || ""
+      );
       const pane = $("#settings-pane");
       const scroll = pane ? pane.scrollTop : 0;
       renderSettings();
@@ -8442,6 +9826,8 @@ async function handleAction(element, event) {
     case "account-edit-cancel":
       state.editingAccountId = null;
       state.accountEditorColor = null;
+      state.accountEditorSignatureEnabled = false;
+      state.accountEditorSignatureHtml = "";
       {
         const pane = $("#settings-pane");
         const scroll = pane ? pane.scrollTop : 0;
@@ -8455,6 +9841,36 @@ async function handleAction(element, event) {
       return;
     case "account-save":
       await saveAccountEditor();
+      return;
+    case "account-signature-edit":
+      openSignatureEditor();
+      return;
+    case "signature-save":
+      await saveSignatureEditor();
+      return;
+    case "signature-cancel":
+      requestCloseSignatureEditor();
+      return;
+    case "signature-discard":
+      closeSignatureEditor();
+      return;
+    case "signature-keep-editing":
+      hideSignatureDiscardConfirm();
+      return;
+    case "signature-link-insert":
+      insertSignatureLink();
+      return;
+    case "signature-link-cancel":
+      hideSignatureLinkRow();
+      return;
+    case "signature-image-small":
+      resizeSignatureContextImage("small");
+      return;
+    case "signature-image-original":
+      resizeSignatureContextImage("original");
+      return;
+    case "signature-image-delete":
+      deleteSignatureImage();
       return;
     case "badge-position":
       state.prefs.badgePosition = element.dataset.position;
@@ -8486,6 +9902,8 @@ async function handleAction(element, event) {
       state.prefs.emailTheme = element.dataset.emailTheme;
       savePrefs();
       syncThemeSelection();
+      updateComposerPaperTheme();
+      updateSignaturePaperTheme();
       if (state.selected) renderReader();
       return;
     case "minimize-behavior":
@@ -8980,6 +10398,39 @@ function bindEvents() {
   });
   settingsPane.addEventListener("change", async (event) => {
     const target = event.target;
+    if (target.id === "account-signature-toggle") {
+      const accountId = state.editingAccountId;
+      const enabled = target.checked;
+      state.accountEditorSignatureEnabled = enabled;
+      const actions = $("#account-signature-actions");
+      if (actions) actions.hidden = !enabled;
+      if (!accountId) return;
+      const status = $("#account-signature-status");
+      try {
+        const data = await api("/api/accounts/update", {
+          method: "POST",
+          body: { id: accountId, signature_enabled: enabled },
+        });
+        state.accounts = data.state.accounts || state.accounts;
+        if (data.signature_html !== undefined) {
+          state.signatures[accountId] = data.signature_html;
+        }
+        if (status) {
+          status.textContent = enabled ? "Signature on" : "Signature off";
+          status.classList.remove("error");
+        }
+      } catch (error) {
+        target.checked = !enabled;
+        state.accountEditorSignatureEnabled = !enabled;
+        if (actions) actions.hidden = enabled;
+        if (status) {
+          status.textContent =
+            error.message || "Could not update the signature setting.";
+          status.classList.add("error");
+        }
+      }
+      return;
+    }
     if (target.matches(".account-color-input")) {
       state.accountEditorColor = target.value;
       updateAccountEditorColors();
@@ -9076,6 +10527,20 @@ function bindEvents() {
   });
 
   const composer = $("#composer");
+  const keepCaretBeforeSignature = (event) => {
+    const editor = event.target.closest?.(".composer-editor");
+    if (!editor) return;
+    if (event.type === "click") {
+      const signature = editor.querySelector("[data-courier-signature]");
+      if (signature && event.clientY > signature.getBoundingClientRect().bottom + 2) {
+        window.setTimeout(() => placeCaretBeforeSignature(editor), 0);
+        return;
+      }
+    }
+    window.setTimeout(() => ensureComposerCaretBeforeSignature(editor), 0);
+  };
+  composer.addEventListener("click", keepCaretBeforeSignature);
+  composer.addEventListener("focusin", keepCaretBeforeSignature);
   composer.addEventListener("click", (event) => {
     if (Date.now() < composerImageClickGuard) {
       event.preventDefault();
@@ -9264,6 +10729,20 @@ function bindEvents() {
     if (event.target.matches(".composer-account")) {
       updateComposerAccount(event.target.value);
       return;
+    }
+  });
+  document.addEventListener("selectionchange", () => {
+    if (!state.composer) return;
+    const editor = $("#composer .composer-editor");
+    const selection = window.getSelection();
+    if (
+      editor &&
+      selection &&
+      selection.rangeCount &&
+      editor.contains(selection.anchorNode)
+    ) {
+      state.composer.lastSelection =
+        selection.getRangeAt(0).cloneRange();
     }
   });
   composer.addEventListener("input", (event) => {
@@ -9481,6 +10960,7 @@ async function init() {
     toast(error.message || "Could not connect to the Courier service", true);
     return;
   }
+  await loadSignatures({ quiet: true });
   state.initialized = true;
   $$(".segment").forEach((button) =>
     button.setAttribute(
